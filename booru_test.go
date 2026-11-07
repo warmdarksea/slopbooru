@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"image"
 	"image/color"
+	"image/png"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -186,7 +188,7 @@ func TestServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{fx.DB, fx.DBLike} {
-		store, err := OpenStore(path)
+		store, err := OpenStore(path, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -221,5 +223,201 @@ func TestServer(t *testing.T) {
 		}
 		ts.Close()
 		store.db.Close()
+	}
+}
+
+// Editing by hand, end to end through the handler.
+func TestEdit(t *testing.T) {
+	dir := t.TempDir()
+	fx, err := fixture.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	editMode = true
+	t.Cleanup(func() { editMode = false })
+	store, err := OpenStore(fx.DB, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.db.Close()
+	ix, err := BuildIndex(fx.Corpus, "", nil, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(&Server{store: store, index: ix, imagesDir: fx.Corpus, thumbs: filepath.Join(dir, "thumbs")})
+	defer ts.Close()
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+	get := func(p string) string {
+		r, err := http.Get(ts.URL + p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Body.Close()
+		b, _ := io.ReadAll(r.Body)
+		return string(b)
+	}
+	post := func(p, origin string, form map[string]string) int {
+		vals := make([]string, 0, len(form))
+		for k, v := range form {
+			vals = append(vals, k+"="+pyquote(v, ""))
+		}
+		req, _ := http.NewRequest("POST", ts.URL+p, strings.NewReader(strings.Join(vals, "&")))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		r, err := noRedirect.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Body.Close()
+		return r.StatusCode
+	}
+	count := func(q string) int64 {
+		n, err := store.count(q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	hits := func(q string) string { // the "<h1>N image(s)" of a search
+		body := get("/?q=" + pyquote(q, ""))
+		i := strings.Index(body, "<h1>")
+		return body[i+4 : strings.Index(body[i:], " image")+i]
+	}
+
+	// a model's tag on image 1, to remove
+	v, err := store.queryOne("SELECT a.value FROM annotations a JOIN provenances p ON p.id = a.provenance_id " +
+		"WHERE a.image_id = 1 AND a.field = 'tag' AND p.model = 'pixai' AND a.confidence > 0 LIMIT 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelTag := pystr(v)
+	link := `/value/tag/` + quoteAll(modelTag) + `">`
+	before := hits("tag:" + modelTag)
+
+	// refused: from another site, or with no origin at all
+	for _, origin := range []string{"", "http://evil.example"} {
+		if code := post("/image/1/add", origin, map[string]string{"field": "tag", "value": "x"}); code != 403 {
+			t.Errorf("POST with origin %q: %d, want 403", origin, code)
+		}
+	}
+
+	// add, with the tag vocabulary's underscores
+	if code := post("/image/1/add", ts.URL, map[string]string{"field": "tag", "value": "  added  by hand "}); code != 303 {
+		t.Fatalf("add: %d", code)
+	}
+	if !strings.Contains(get("/image/1"), `/value/tag/added_by_hand">added_by_hand</a>`) || hits("tag:added_by_hand") != "1" {
+		t.Error("added tag not on the page or not searchable")
+	}
+
+	// remove a model's tag: hidden from the page, search and facets; kept in the db
+	if code := post("/image/1/remove", ts.URL, map[string]string{"field": "tag", "value": modelTag}); code != 303 {
+		t.Fatalf("remove: %d", code)
+	}
+	page1 := get("/image/1")
+	if strings.Contains(page1, link) || !strings.Contains(page1, "removed by hand") {
+		t.Error("removed tag still shown, or not listed as removed")
+	}
+	if after := hits("tag:" + modelTag); after == before {
+		t.Errorf("search for the removed tag still finds image 1 (%s before and after)", before)
+	}
+	if count("SELECT COUNT(*) FROM annotations a JOIN provenances p ON p.id = a.provenance_id "+
+		"WHERE a.image_id = 1 AND p.model = 'pixai' AND a.value = '"+strings.ReplaceAll(modelTag, "'", "''")+"'") != 1 {
+		t.Error("the model's own row should stay in the db")
+	}
+
+	// restore
+	if code := post("/image/1/restore", ts.URL, map[string]string{"field": "tag", "value": modelTag}); code != 303 {
+		t.Fatalf("restore: %d", code)
+	}
+	if !strings.Contains(get("/image/1"), link) || hits("tag:"+modelTag) != before {
+		t.Error("restored tag not back")
+	}
+
+	// removing a hand-added value leaves no marker behind
+	post("/image/1/remove", ts.URL, map[string]string{"field": "tag", "value": "added_by_hand"})
+	if n := count("SELECT COUNT(*) FROM annotations WHERE value = 'added_by_hand'"); n != 0 {
+		t.Errorf("%d rows left for a hand-added value removed by hand", n)
+	}
+
+	// upload: a new picture, then the same bytes again
+	mkpng := func(c byte) []byte {
+		im := image.NewRGBA(image.Rect(0, 0, 3, 2))
+		for i := range im.Pix {
+			im.Pix[i] = c
+		}
+		var b bytes.Buffer
+		if err := png.Encode(&b, im); err != nil {
+			t.Fatal(err)
+		}
+		return b.Bytes()
+	}
+	upload := func(name string, data []byte) (int, string) {
+		var body bytes.Buffer
+		mw := multipart.NewWriter(&body)
+		fw, _ := mw.CreateFormFile("files", name)
+		fw.Write(data)
+		mw.Close()
+		req, _ := http.NewRequest("POST", ts.URL+"/upload", &body)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		req.Header.Set("Origin", ts.URL)
+		r, err := noRedirect.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Body.Close()
+		return r.StatusCode, r.Header.Get("Location")
+	}
+	images := count("SELECT COUNT(*) FROM images")
+	code, loc := upload("../../sneaky name.png", mkpng(77))
+	if code != 303 || !strings.HasPrefix(loc, "/image/") {
+		t.Fatalf("upload: %d %q", code, loc)
+	}
+	if _, err := os.Stat(filepath.Join(fx.Corpus, "sneaky name.png")); err != nil {
+		t.Errorf("upload not saved under its own name in the picture folder: %v", err)
+	}
+	if count("SELECT COUNT(*) FROM images") != images+1 {
+		t.Error("upload did not add an image")
+	}
+	r, _ := http.Get(ts.URL + strings.Replace(loc, "/image/", "/file/", 1))
+	got, _ := io.ReadAll(r.Body)
+	r.Body.Close()
+	if !bytes.Equal(got, mkpng(77)) {
+		t.Error("the uploaded file is not served back")
+	}
+	code2, loc2 := upload("again.png", mkpng(77))
+	if code2 != 303 || loc2 != loc || count("SELECT COUNT(*) FROM images") != images+1 {
+		t.Errorf("the same bytes again should be the same image: %d %q vs %q", code2, loc2, loc)
+	}
+	if _, err := os.Stat(filepath.Join(fx.Corpus, "again.png")); err == nil {
+		t.Error("a duplicate upload should not write a second file")
+	}
+	if code, _ := upload("notes.png", []byte("not a picture")); code != 400 {
+		t.Errorf("a non-image upload: %d, want 400", code)
+	}
+
+	// delete: the image and everything said about it; the file stays
+	if code := post("/image/1/delete", ts.URL, nil); code != 303 {
+		t.Fatalf("delete: %d", code)
+	}
+	if n := count("SELECT COUNT(*) FROM annotations WHERE image_id = 1") + count("SELECT COUNT(*) FROM image_paths WHERE image_id = 1"); n != 0 {
+		t.Errorf("%d rows left for a deleted image (cascade off?)", n)
+	}
+	if r, _ := http.Get(ts.URL + "/image/1"); r.StatusCode != 404 {
+		t.Errorf("deleted image page: %d", r.StatusCode)
+	}
+	if _, err := os.Stat(filepath.Join(fx.Corpus, fx.Files[0].Name)); err != nil {
+		t.Error("deleting an image must not delete the file")
+	}
+	if strings.Contains(get("/?q=marisa"), "db error") {
+		t.Error("search broken after a delete (fts out of sync?)")
+	}
+
+	// with editing off, every edit is refused
+	editMode = false
+	if code := post("/image/2/add", ts.URL, map[string]string{"field": "tag", "value": "x"}); code != 403 {
+		t.Errorf("edit with editing off: %d, want 403", code)
 	}
 }

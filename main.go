@@ -51,6 +51,7 @@ func main() {
 	port := fs.Int("port", 8800, "port to listen on")
 	thumbs := fs.String("thumbs", "", "cache directory for thumbnails and file hashes (default: <db>.thumbs)")
 	jobs := fs.Int("hash-jobs", min(4, runtime.NumCPU()), "files hashed in parallel while indexing --images")
+	edit := fs.Bool("edit", false, "allow editing from the pages: add/remove values, upload/delete images\n(anyone who can reach --host:--port can edit; the db must be writable)")
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "%s %s: browse an image recognition db\n\n"+
@@ -85,7 +86,8 @@ func main() {
 	if _, err := os.Stat(dbPath); err != nil {
 		die("no such db: %s", *db)
 	}
-	store, err := OpenStore(dbPath)
+	editMode = *edit
+	store, err := OpenStore(dbPath, *edit)
 	if err != nil {
 		die("cannot open %s: %v", *db, err)
 	}
@@ -122,7 +124,7 @@ func main() {
 		die("cannot listen on %s: %v", addr, err)
 	}
 
-	srv := &Server{store: store, thumbs: cacheDir,
+	srv := &Server{store: store, thumbs: cacheDir, imagesDir: imagesAbs(*images),
 		verbose: os.Getenv("SLOPBOORU_VERBOSE") != "" || os.Getenv("LLM_BOORU_VERBOSE") != ""}
 	if *images != "" {
 		if st, err := os.Stat(*images); err != nil || !st.IsDir() {
@@ -163,4 +165,15 @@ func matched(s *Store, ix *Index) (int, int) {
 		}
 	}
 	return n, len(rows)
+}
+
+func imagesAbs(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return dir
+	}
+	return abs
 }

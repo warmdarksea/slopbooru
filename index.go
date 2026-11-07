@@ -31,6 +31,7 @@ type fileKey struct {
 }
 
 type Index struct {
+	mu     sync.RWMutex        // uploads add while requests read
 	byHash map[string][]string // sha256 -> absolute paths, sorted
 	Files  int
 	Cached int
@@ -39,10 +40,20 @@ type Index struct {
 
 // Path is the file to serve for a sha256, or "".
 func (ix *Index) Path(sha string) string {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
 	if ps := ix.byHash[sha]; len(ps) > 0 {
 		return ps[0]
 	}
 	return ""
+}
+
+// Add records a file written while serving (an upload).
+func (ix *Index) Add(sha, path string) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	ix.byHash[sha] = append(ix.byHash[sha], path)
+	sort.Strings(ix.byHash[sha])
 }
 
 const hashCacheSchema = `

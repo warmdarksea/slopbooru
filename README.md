@@ -40,6 +40,30 @@ Search box: `marisa` (prefix match over every value), `rating:safe`,
 `tag:solo`, `subject:"maid girl"`, `"a phrase"`, `model:pixai tag:marisa`
 (what *that* model tagged), `field:description`.
 
+## Editing by hand
+
+Start it with `--edit` and the pages gain controls:
+
+- **add** a value to an image: a tag, character, source, rating, or a
+  description of your own. Spaces in a tag become underscores, like the
+  rest of the tag vocabulary.
+- **remove** any value with the × beside it. It disappears from that image
+  everywhere (the page, search, the sidebar counts), whichever model said
+  it. What the model said is kept in the db, so **restore** brings it back.
+- **upload** pictures (header link). They are saved into the `--images`
+  folder under their own names and added to the db untagged. A picture
+  already in the db is recognised by content and not added twice.
+- **delete image**: removes it and everything said about it from the db.
+  The file itself stays on disk.
+
+Your edits are stored in the db as their own source, `manual`, next to
+the models'. They're listed on `/stats` and the provenance pages like any
+other source.
+
+Editing is off by default. With `--edit`, anyone who can reach the
+address and port can edit, so keep `--host 127.0.0.1` unless you trust
+the network. The db file must be writable.
+
 ## Building
 
 With nix:

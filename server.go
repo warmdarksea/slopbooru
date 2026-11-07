@@ -13,10 +13,11 @@ import (
 )
 
 type Server struct {
-	store   *Store
-	index   *Index // nil: serve the paths recorded in the db
-	thumbs  string
-	verbose bool
+	store     *Store
+	index     *Index // nil: serve the paths recorded in the db
+	thumbs    string
+	imagesDir string // --images, where uploads go ("" if none)
+	verbose   bool
 }
 
 // errBadRequest is the ValueError of the Python handler: a 400, not a 500.
@@ -75,11 +76,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				r.Method, r.RequestURI, r.Proto, sw.code)
 		}()
 	}
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+	var err error
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		err = s.route(sw, r)
+	case http.MethodPost:
+		err = s.post(sw, r)
+	default:
 		sendHTML(sw, page("501", "<h1>not implemented</h1>", ""), 501)
 		return
 	}
-	err := s.route(sw, r)
 	switch {
 	case err == nil:
 	case errors.Is(err, errBadRequest):
@@ -104,6 +110,9 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) error {
 		return htmlOr404(w, text, err)
 	}
 	switch {
+	case parts[0] == "upload" && len(parts) == 1 && editMode:
+		sendHTML(w, uploadPage(s.imagesDir != ""), 200)
+		return nil
 	case parts[0] == "stats":
 		text, err := s.store.RenderStats()
 		return htmlOr404(w, text, err)

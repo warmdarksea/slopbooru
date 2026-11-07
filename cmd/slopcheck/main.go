@@ -21,9 +21,12 @@ import (
 	"fmt"
 	"image"
 	_ "image/jpeg"
+	"image/png"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -248,6 +251,9 @@ func main() {
 	}
 	s.stop()
 
+	// ---- --edit: add, remove, restore, upload, delete, on a copy of the db
+	checkEdit(fx, pics, filepath.Join(dir, "edit"), port)
+
 	// ---- without --images: the recorded paths, which do not exist here
 	s = start(booru(fx.DB, "", thumbs, port), port)
 	for id := range shaOf {
@@ -459,3 +465,92 @@ func urlQuote(s string) string {
 }
 
 func pathQuote(s string) string { return urlQuote(s) }
+
+// checkEdit drives --edit through the binary's own pages, on a copy of the
+// db: what the unit test covers, but against the real executable, so the
+// file writes behind an upload are exercised on windows too.
+func checkEdit(fx *fixture.Fixture, pics, dir string, port int) {
+	must(os.MkdirAll(dir, 0o755))
+	dbPath := filepath.Join(dir, "results.db")
+	copyFile(fx.DB, dbPath)
+
+	db, err := sql.Open("sqlite", dbPath)
+	must(err)
+	var tag string
+	must(db.QueryRow("SELECT a.value FROM annotations a JOIN provenances p ON p.id = a.provenance_id " +
+		"WHERE a.image_id = 2 AND a.field = 'tag' AND p.model = 'pixai' AND a.confidence > 0 LIMIT 1").Scan(&tag))
+	db.Close()
+	link := "/value/tag/" + urlQuote(tag) + `">`
+
+	s := start(append(booru(dbPath, pics, filepath.Join(dir, "thumbs"), port), "--edit"), port)
+	defer s.stop()
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	do := func(req *http.Request, origin bool) (int, string) {
+		if origin {
+			req.Header.Set("Origin", s.base)
+		}
+		r, err := noRedirect.Do(req)
+		if err != nil {
+			fail("%s %s: %v", req.Method, req.URL.Path, err)
+			return 0, ""
+		}
+		r.Body.Close()
+		return r.StatusCode, r.Header.Get("Location")
+	}
+	post := func(path string, form url.Values, origin bool) int {
+		req, _ := http.NewRequest("POST", s.base+path, strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		code, _ := do(req, origin)
+		return code
+	}
+	tagForm := func(v string) url.Values { return url.Values{"field": {"tag"}, "value": {v}} }
+
+	if code := post("/image/2/add", tagForm("from slopcheck"), false); code != 403 {
+		fail("edit without an Origin: %d, want 403", code)
+	}
+	if code := post("/image/2/add", tagForm("from slopcheck"), true); code != 303 ||
+		!bytes.Contains(get(s.base, "/image/2").body, []byte(`/value/tag/from_slopcheck">`)) {
+		fail("--edit add: %d, or the tag is not on the page", code)
+	}
+	if code := post("/image/2/remove", tagForm(tag), true); code != 303 ||
+		bytes.Contains(get(s.base, "/image/2").body, []byte(link)) {
+		fail("--edit remove: %d, or %q still shown", code, tag)
+	}
+	if code := post("/image/2/restore", tagForm(tag), true); code != 303 ||
+		!bytes.Contains(get(s.base, "/image/2").body, []byte(link)) {
+		fail("--edit restore: %d, or %q not back", code, tag)
+	}
+
+	// upload a picture nobody has seen, then delete it
+	im := image.NewRGBA(image.Rect(0, 0, 5, 4))
+	for i := range im.Pix {
+		im.Pix[i] = byte(i * 7)
+	}
+	var data bytes.Buffer
+	must(png.Encode(&data, im))
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	fw, _ := mw.CreateFormFile("files", "uploaded by slopcheck.png")
+	fw.Write(data.Bytes())
+	mw.Close()
+	req, _ := http.NewRequest("POST", s.base+"/upload", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	code, loc := do(req, true)
+	if code != 303 || !strings.HasPrefix(loc, "/image/") {
+		fail("--edit upload: %d %q", code, loc)
+		return
+	}
+	saved := filepath.Join(pics, "uploaded by slopcheck.png")
+	if b, err := os.ReadFile(saved); err != nil || !bytes.Equal(b, data.Bytes()) {
+		fail("upload not saved as %s: %v", saved, err)
+	}
+	if r := get(s.base, strings.Replace(loc, "/image/", "/file/", 1)); !bytes.Equal(r.body, data.Bytes()) {
+		fail("the upload is not served back")
+	}
+	if code := post(loc+"/delete", url.Values{}, true); code != 303 || get(s.base, loc).code != 404 {
+		fail("--edit delete: %d, or %s still there", code, loc)
+	}
+	if _, err := os.Stat(saved); err != nil {
+		fail("deleting the image must leave the file: %v", err)
+	}
+}

@@ -153,7 +153,22 @@ func sqliteURI(path string, query string) string {
 	return "file://" + b.String() + "?" + query
 }
 
-func OpenStore(path string) (*Store, error) {
+func OpenStore(path string, writable bool) (*Store, error) {
+	if writable {
+		// --edit: read-write, with the foreign keys on so that deleting an
+		// image cascades to everything said about it
+		s := &Store{path: path}
+		if err := s.open("mode=rw&_pragma=foreign_keys(1)"); err != nil {
+			return nil, err
+		}
+		if _, err := s.queryOne("SELECT COUNT(*) FROM images"); err != nil {
+			s.db.Close()
+			return nil, err
+		}
+		_, err := s.queryOne("SELECT 1 FROM annotations_fts LIMIT 1")
+		s.fts = err == nil
+		return s, nil
+	}
 	s := &Store{path: path, readonly: true}
 	// read-only is the right default -- the browser never writes -- but
 	// opening a WAL database that way needs a usable -shm, which is not
@@ -298,7 +313,7 @@ func (s *Store) Search(qs string, pageNo int) ([]Row, bool, int64, error) {
 	var imgArgs []any
 	for _, name := range valueFilters {
 		for _, val := range filters[name] {
-			q := []string{"SELECT 1 FROM annotations x"}
+			q := []string{"SELECT 1 FROM " + visible + " x"}
 			if len(models) > 0 {
 				q = append(q, "JOIN provenances q ON q.id = x.provenance_id")
 			}
@@ -320,10 +335,10 @@ func (s *Store) Search(qs string, pageNo int) ([]Row, bool, int64, error) {
 	// a.* / p.* drops the non-matching images on its own.
 	q := []string{
 		"SELECT i.id, i.sha256, i.width, i.height,",
-		"  (SELECT COUNT(*) FROM annotations y WHERE y.image_id = i.id) AS n_ann,",
+		"  (SELECT COUNT(*) FROM " + visible + " y WHERE y.image_id = i.id) AS n_ann,",
 		"  COUNT(a.id) AS hits, MAX(COALESCE(a.confidence, 0)) AS best",
 		"FROM images i",
-		"LEFT JOIN annotations a ON a.image_id = i.id",
+		"LEFT JOIN " + visible + " a ON a.image_id = i.id",
 		"LEFT JOIN provenances p ON p.id = a.provenance_id",
 	}
 	if clauses := append(append([]string{}, where...), imgWhere...); len(clauses) > 0 {
@@ -357,19 +372,19 @@ func (s *Store) Search(qs string, pageNo int) ([]Row, bool, int64, error) {
 // Summary is the chips for a grid card: best subject, rating votes, counts.
 func (s *Store) Summary(imageID any) (Row, []Row, int64, error) {
 	subj, err := s.queryRow(
-		"SELECT value, confidence FROM annotations WHERE image_id = ? "+
+		"SELECT value, confidence FROM "+visible+" WHERE image_id = ? "+
 			"AND field = 'subject' ORDER BY COALESCE(confidence, 0) DESC LIMIT 1", imageID)
 	if err != nil {
 		return nil, nil, 0, err
 	}
 	ratings, err := s.query(
-		"SELECT value, COUNT(*) n FROM annotations WHERE image_id = ? "+
+		"SELECT value, COUNT(*) n FROM "+visible+" WHERE image_id = ? "+
 			"AND field = 'rating' GROUP BY value ORDER BY n DESC", imageID)
 	if err != nil {
 		return nil, nil, 0, err
 	}
 	models, err := s.count(
-		"SELECT COUNT(DISTINCT provenance_id) FROM annotations WHERE image_id = ?", imageID)
+		"SELECT COUNT(DISTINCT provenance_id) FROM "+visible+" WHERE image_id = ?", imageID)
 	return subj, ratings, models, err
 }
 

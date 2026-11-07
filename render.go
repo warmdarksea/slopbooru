@@ -29,17 +29,22 @@ func confBar(c any) string {
 }
 
 func page(title, body, q string) string {
+	style, upload := css, ""
+	if editMode { // only with --edit, so the read-only pages stay the python booru's
+		style += editCSS
+		upload = "\n  <span class=\"muted\"><a href=\"/upload\">upload</a></span>"
+	}
 	return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>` + e(title) + `</title><style>` + css + `</style></head><body>
+<title>` + e(title) + `</title><style>` + style + `</style></head><body>
 <header>
   <span class="brand"><a href="/">` + e(brand) + `</a></span>
   <form action="/" method="get">
     <input type="search" name="q" value="` + e(q) + `"
       placeholder="marisa &middot; rating:safe &middot; model:pixai tag:marisa &middot; &quot;trying hard&quot;">
     <button type="submit">search</button>
-  </form>
+  </form>` + upload + `
   <span class="muted"><a href="/stats">stats</a></span>
 </header>
 <main>` + body + `</main></body></html>`
@@ -157,7 +162,7 @@ func (s *Store) renderSidebar() (string, error) {
 		limit        int
 	}{{"characters", "subject", 18}, {"tags", "tag", 30}, {"sources", "source", 12}} {
 		rows, err := s.query(
-			"SELECT value, COUNT(DISTINCT image_id) n FROM annotations "+
+			"SELECT value, COUNT(DISTINCT image_id) n FROM "+visible+" "+
 				"WHERE field = ? GROUP BY value ORDER BY n DESC, value LIMIT ?",
 			f.field, f.limit)
 		if err != nil {
@@ -173,7 +178,7 @@ func (s *Store) renderSidebar() (string, error) {
 		}
 	}
 	rows, err := s.query(
-		"SELECT p.model, COUNT(*) n FROM annotations a " +
+		"SELECT p.model, COUNT(*) n FROM " + visible + " a " +
 			"JOIN provenances p ON p.id = a.provenance_id GROUP BY p.model ORDER BY n DESC")
 	if err != nil {
 		return "", err
@@ -306,7 +311,7 @@ func (s *Store) RenderImage(imageID int64, sortKey string) (string, error) {
 	}
 	rows, err := s.query(
 		"SELECT a.field, a.key, a.value, a.confidence, a.detail, p.model, "+
-			"       p.id AS pid FROM annotations a "+
+			"       p.id AS pid FROM "+visible+" a "+
 			"JOIN provenances p ON p.id = a.provenance_id WHERE a.image_id = ? "+
 			// a model that scored a value at zero said "not this"; it is not
 			// an answer worth a row of the page. A NULL confidence is
@@ -317,7 +322,7 @@ func (s *Store) RenderImage(imageID int64, sortKey string) (string, error) {
 		return "", err
 	}
 	zeros, err := s.count(
-		"SELECT COUNT(*) FROM annotations WHERE image_id = ? AND confidence = 0", imageID)
+		"SELECT COUNT(*) FROM "+visible+" WHERE image_id = ? AND confidence = 0", imageID)
 	if err != nil {
 		return "", err
 	}
@@ -412,11 +417,21 @@ func (s *Store) RenderImage(imageID int64, sortKey string) (string, error) {
 			if truthy(r["key"]) {
 				val = `<span class="muted">` + e(r["key"]) + `:</span> ` + val
 			}
+			if editMode {
+				val += removeButton(imageID, field, pystr(r["key"]), pystr(r["value"]))
+			}
 			right = append(right, "<tr><td>"+val+"</td><td>"+confBar(r["confidence"])+"</td>"+
 				`<td><a class="badge" href="/provenance/`+pystr(r["pid"])+`">`+
 				e(r["model"])+"</a></td></tr>")
 		}
 		right = append(right, "</table>")
+	}
+	removed, err := s.removedNote(imageID)
+	if err != nil {
+		return "", err
+	}
+	if removed != "" {
+		right = append(right, removed)
 	}
 	if zeros != 0 {
 		right = append(right, fmt.Sprintf(`<p class="muted">%d value(s) scored 0 and are not shown.</p>`, zeros))
@@ -428,6 +443,9 @@ func (s *Store) RenderImage(imageID int64, sortKey string) (string, error) {
 				`<td class="mono">`+e(f["error"])+`</td></tr>`)
 		}
 		right = append(right, "</table>")
+	}
+	if editMode {
+		right = append(right, editPanel(imageID))
 	}
 	body := `<div class="detail"><div>` + strings.Join(left, "") + `</div>` +
 		`<div>` + strings.Join(right, "") + `</div></div>`
@@ -451,7 +469,7 @@ func (s *Store) RenderValue(field, value string, pageNo int) (string, error) {
 	}
 	models, err := s.query(
 		"SELECT p.model, COUNT(*) n, ROUND(AVG(a.confidence), 3) c "+
-			"FROM annotations a JOIN provenances p ON p.id = a.provenance_id "+
+			"FROM "+visible+" a JOIN provenances p ON p.id = a.provenance_id "+
 			"WHERE a.field = ? AND a.value = ? COLLATE NOCASE GROUP BY p.model "+
 			"ORDER BY n DESC", field, value)
 	if err != nil {
