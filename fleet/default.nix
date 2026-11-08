@@ -4,7 +4,7 @@
 #
 #   nix-build -A fleet.engine          the vllm virtualenv (vllm, torch, the tagger's deps)
 #   nix-build -A fleet.timeshare-toml  a timeshare.toml running every model as a child process
-#   fleet.models                       the same models for services.gpu-timeshare.models
+#   fleet.models, fleet.settings       the same, for services.gpu-timeshare.{models,settings}
 #
 # Everything about *serving* a model lives here: weights, engine, vllm's
 # settings, its share of the card. Everything about *asking* it (prompt,
@@ -75,6 +75,13 @@ let
       fingerprint = "${w}#${builtins.substring 0 16 (builtins.hashString "sha256" (builtins.toJSON s))}";
     };
 
+  # the rest of the config, for services.gpu-timeshare.settings (or the
+  # toml below): the big models take the card an hour at a time when more
+  # than one has work, and vllm may take a while to load one
+  settings = {
+    scheduler = { rotation = "1h"; start_timeout = "20m"; };
+  };
+
   models = {
     qwen = served "qwen" { cost = 0.95; seqs = 8;
       settings = structured // { mm_processor_kwargs = { max_pixels = 2500000; }; }; };
@@ -95,15 +102,12 @@ let
   };
 in
 {
-  inherit engine weights vllm pixai-server models;
+  inherit engine weights vllm pixai-server models settings;
   vllm-env = engine.vllm-env;
   lock-engine = engine.lock;
 
-  # every model as a child process of timeshare (no systemd needed):
-  #   timeshare serve --config $(nix-build -A fleet.timeshare-toml)
+  # every model as a child process of gpu-timeshare (no systemd needed):
+  #   gpu-timeshare serve --config $(nix-build -A fleet.timeshare-toml)
   # with state_dir the directory it is run in
-  timeshare-toml = (pkgs.formats.toml { }).generate "timeshare.toml" {
-    scheduler = { start_timeout = "20m"; };
-    models = lib.mapAttrs (_: m: m // { start_timeout = "20m"; }) models;
-  };
+  timeshare-toml = (pkgs.formats.toml { }).generate "timeshare.toml" (settings // { inherit models; });
 }
