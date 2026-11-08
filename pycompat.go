@@ -1,9 +1,10 @@
 package main
 
-// Formatting that matches what the Python booru (src/llm-booru) printed,
-// byte for byte, so the two can be diffed page by page: html.escape,
-// urllib.parse.quote, str() of a float, json.dumps. Each one differs from
-// Go's own in some small way that would otherwise show up in every page.
+// Formatting as the Python booru this was ported from printed it:
+// html.escape, urllib.parse.quote, str() of a float, json.dumps. The pages
+// were byte-identical to that booru's until the booru layout replaced its
+// own; these stay because the db's values (python's json.dumps in the
+// details, its floats) are written in the same dialect.
 
 import (
 	"bytes"

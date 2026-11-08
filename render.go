@@ -1,7 +1,8 @@
 package main
 
-// Every page, built the way the Python booru built it -- string pieces in
-// the same order -- so its output can be diffed against this one's.
+// Every page. A booru's shape: the values on a sidebar to the left, the
+// pictures beside it; on an image page the picture fitted to the screen with
+// its descriptions underneath, and every value a model gave below that.
 
 import (
 	_ "embed"
@@ -14,7 +15,6 @@ import (
 //go:embed style.css
 var styleCSS string
 
-// css is the stylesheet as the Python triple-quoted string held it.
 var css = "\n" + styleCSS
 
 func confBar(c any) string {
@@ -30,7 +30,7 @@ func confBar(c any) string {
 
 func page(title, body, q string) string {
 	style, upload := css, ""
-	if editMode { // only with --edit, so the read-only pages stay the python booru's
+	if editMode { // the edit controls exist only with --edit
 		style += editCSS
 		upload = "\n  <span class=\"muted\"><a href=\"/upload\">upload</a></span>"
 	}
@@ -50,6 +50,32 @@ func page(title, body, q string) string {
 <main>` + body + `</main></body></html>`
 }
 
+// layout is a booru page: the sidebar, then the content beside it (on a
+// narrow screen, under it).
+func layout(side, content string) string {
+	return `<div class="layout"><aside class="side">` + side + `</aside>` +
+		`<section class="content">` + content + `</section></div>`
+}
+
+// the sidebar's groups, in order: field, heading, how many to list
+var sideGroups = []struct {
+	field, title string
+	limit        int
+}{
+	{"subject", "characters", 25}, {"source", "sources", 15}, {"tag", "tags", 60},
+	{"emotion", "moods", 15}, {"hazard", "hazards", 15}, {"rating", "rating", 6},
+	{"verdict", "verdict", 4}, {"dimensionality", "dimensionality", 4},
+}
+
+// narrow is the search q with one more value required; "" when the value
+// can't be written as a filter (a double quote in it).
+func narrow(q, field, value string) string {
+	if strings.Contains(value, `"`) {
+		return ""
+	}
+	return "/?q=" + quote(strings.TrimSpace(q+" "+field+`:"`+value+`"`))
+}
+
 func i64(v any) int64 {
 	switch x := v.(type) {
 	case int64:
@@ -60,8 +86,10 @@ func i64(v any) int64 {
 	return 0
 }
 
-func (s *Store) renderCards(rows []Row) (string, error) {
-	out := []string{`<div class="grid">`}
+// renderThumbs is the grid of pictures, each the whole picture fitted to
+// its cell; what used to be a card's text is its tooltip.
+func (s *Store) renderThumbs(rows []Row) (string, error) {
+	out := []string{`<div class="thumbs">`}
 	for _, r := range rows {
 		subj, ratings, models, err := s.Summary(r["id"])
 		if err != nil {
@@ -77,24 +105,34 @@ func (s *Store) renderCards(rows []Row) (string, error) {
 		} else {
 			name = pystr(r["sha256"])[:12]
 		}
-		chips := ""
+		tip := []string{name}
 		if subj != nil {
-			chips += `<span class="chip">` + e(subj["value"]) + `</span>`
+			tip = append(tip, pystr(subj["value"]))
 		}
+		cls := "thumb"
 		if len(ratings) > 0 {
-			top := ratings[0]["value"]
-			chips += `<span class="chip r-` + e(top) + `">` + e(top) + `</span>`
+			top := pystr(ratings[0]["value"])
+			tip = append(tip, "rating:"+top)
+			cls += " r-" + safeClass(top)
 		}
+		tip = append(tip, pystr(r["n_ann"])+" values · "+pystr(models)+" models")
 		id := pystr(r["id"])
-		out = append(out,
-			`<div class="card"><a href="/image/`+id+`">`+
-				`<img loading="lazy" src="/thumb/`+id+`" alt="`+e(name)+`"></a>`+
-				`<div class="meta">`+chips+`<div class="name">`+e(name)+`</div>`+
-				`<div class="muted">`+pystr(r["n_ann"])+` values · `+pystr(models)+` models</div>`+
-				`</div></div>`)
+		out = append(out, `<a class="`+cls+`" href="/image/`+id+`" title="`+e(strings.Join(tip, " · "))+`">`+
+			`<img loading="lazy" src="/thumb/`+id+`" alt="`+e(name)+`"></a>`)
 	}
 	out = append(out, "</div>")
 	return strings.Join(out, ""), nil
+}
+
+// safeClass keeps a value usable as a css class name
+func safeClass(v string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(v) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // sortHeader is a clickable column head: the same page, ordered by that column.
@@ -155,55 +193,86 @@ func verdictDetail(blob any) string {
 	return "<details><summary>what it judged</summary>" + strings.Join(bits, "") + "</details>"
 }
 
-func (s *Store) renderSidebar() (string, error) {
-	out := []string{`<div class="side">`}
-	for _, f := range []struct {
-		title, field string
-		limit        int
-	}{{"characters", "subject", 18}, {"tags", "tag", 30}, {"sources", "source", 12}} {
-		rows, err := s.query(
-			"SELECT value, COUNT(DISTINCT image_id) n FROM "+visible+" "+
-				"WHERE field = ? GROUP BY value ORDER BY n DESC, value LIMIT ?",
-			f.field, f.limit)
+// listingSide is a listing's sidebar: the values of the pictures on this
+// page, each with the number of pictures in the store that have it, and a
+// + that narrows the current search to it. Values a model scored 0 ("not
+// this") don't count.
+func (s *Store) listingSide(rows []Row, q string) (string, error) {
+	var out []string
+	if len(rows) > 0 {
+		var args []any
+		for _, r := range rows {
+			args = append(args, r["id"])
+		}
+		for _, g := range sideGroups {
+			args = append(args, g.field)
+		}
+		vals, err := s.query(
+			"WITH here AS (SELECT DISTINCT field, value FROM "+visible+" "+
+				"WHERE image_id IN ("+placeholders(len(rows))+") "+
+				"AND field IN ("+placeholders(len(sideGroups))+") "+
+				"AND (confidence IS NULL OR confidence > 0)) "+
+				"SELECT h.field, h.value, COUNT(DISTINCT v.image_id) n FROM here h "+
+				"JOIN "+visible+" v ON v.field = h.field AND v.value = h.value "+
+				"AND (v.confidence IS NULL OR v.confidence > 0) "+
+				"GROUP BY h.field, h.value ORDER BY n DESC, h.value", args...)
 		if err != nil {
 			return "", err
 		}
-		if len(rows) == 0 {
-			continue
+		byField := map[string][]Row{}
+		for _, v := range vals {
+			f := pystr(v["field"])
+			byField[f] = append(byField[f], v)
 		}
-		out = append(out, "<h3>"+f.title+"</h3>")
-		for _, r := range rows {
-			out = append(out, `<a href="/value/`+f.field+`/`+quoteAll(pystr(r["value"]))+`">`+
-				e(r["value"])+` <span class="n">`+pystr(r["n"])+`</span></a>`)
+		for _, g := range sideGroups {
+			vs := byField[g.field]
+			if len(vs) == 0 {
+				continue
+			}
+			out = append(out, "<h3>"+g.title+"</h3><ul>")
+			for i, v := range vs {
+				if i == g.limit {
+					out = append(out, fmt.Sprintf(`<li class="muted">and %d more</li>`, len(vs)-g.limit))
+					break
+				}
+				val := pystr(v["value"])
+				add := ""
+				if href := narrow(q, g.field, val); href != "" {
+					add = `<a class="add" href="` + href + `" title="narrow the search to this">+</a>`
+				}
+				out = append(out, `<li>`+add+`<a href="/value/`+g.field+`/`+quoteAll(val)+`">`+
+					e(val)+`</a> <span class="n">`+pystr(v["n"])+`</span></li>`)
+			}
+			out = append(out, "</ul>")
 		}
 	}
-	rows, err := s.query(
+	rows2, err := s.query(
 		"SELECT p.model, COUNT(*) n FROM " + visible + " a " +
 			"JOIN provenances p ON p.id = a.provenance_id GROUP BY p.model ORDER BY n DESC")
 	if err != nil {
 		return "", err
 	}
-	if len(rows) > 0 {
-		out = append(out, "<h3>models</h3>")
-		for _, r := range rows {
-			out = append(out, `<a href="/?q=model:`+quote(pystr(r["model"]))+`">`+
-				e(r["model"])+` <span class="n">`+pystr(r["n"])+`</span></a>`)
+	if len(rows2) > 0 {
+		out = append(out, "<h3>models</h3><ul>")
+		for _, r := range rows2 {
+			out = append(out, `<li><a href="/?q=model:`+quote(pystr(r["model"]))+`">`+
+				e(r["model"])+`</a> <span class="n">`+pystr(r["n"])+`</span></li>`)
 		}
+		out = append(out, "</ul>")
 	}
-	out = append(out, "</div>")
 	return strings.Join(out, ""), nil
 }
 
 // gridPage is the shared shape of the index and a value listing.
 func (s *Store) gridPage(heading string, rows []Row, more bool, pageNo int,
-	empty, prev, next string) (string, error) {
-	body := []string{heading, `<div class="layout"><div>`}
+	empty, prev, next, q string) (string, error) {
+	body := []string{heading}
 	if len(rows) > 0 {
-		cards, err := s.renderCards(rows)
+		thumbs, err := s.renderThumbs(rows)
 		if err != nil {
 			return "", err
 		}
-		body = append(body, cards)
+		body = append(body, thumbs)
 	} else {
 		body = append(body, empty)
 	}
@@ -217,13 +286,11 @@ func (s *Store) gridPage(heading string, rows []Row, more bool, pageNo int,
 	if len(nav) > 0 {
 		body = append(body, `<div class="pager">`+strings.Join(nav, " ")+"</div>")
 	}
-	body = append(body, "</div>")
-	side, err := s.renderSidebar()
+	side, err := s.listingSide(rows, q)
 	if err != nil {
 		return "", err
 	}
-	body = append(body, side, "</div>")
-	return strings.Join(body, ""), nil
+	return layout(side, strings.Join(body, "")), nil
 }
 
 func (s *Store) RenderIndex(qs string, pageNo int) (string, error) {
@@ -241,7 +308,7 @@ func (s *Store) RenderIndex(qs string, pageNo int) (string, error) {
 	h += "</h1>"
 	body, err := s.gridPage(h, rows, more, pageNo, "<p class='muted'>nothing here.</p>",
 		fmt.Sprintf(`<a href="/?q=%s&page=%d">← newer</a>`, quote(qs), pageNo-1),
-		fmt.Sprintf(`<a href="/?q=%s&page=%d">older →</a>`, quote(qs), pageNo+1))
+		fmt.Sprintf(`<a href="/?q=%s&page=%d">older →</a>`, quote(qs), pageNo+1), qs)
 	if err != nil {
 		return "", err
 	}
@@ -337,46 +404,6 @@ func (s *Store) RenderImage(imageID int64, sortKey string) (string, error) {
 	if len(paths) > 0 {
 		name = basename(paths[0])
 	}
-	var boxes []box
-	for _, r := range rows {
-		if d, ok := r["detail"].(string); ok && r["field"] == "text" && d != "" {
-			boxes = append(boxes, ocrBoxes(d)...)
-		}
-	}
-
-	shot := []string{fmt.Sprintf(`<div class="shot show" id="shot"><img src="/file/%d" alt="%s">`,
-		imageID, e(name))}
-	for _, b := range boxes {
-		shot = append(shot, fmt.Sprintf(
-			`<div class="box" style="left:%.2f%%;top:%.2f%%;width:%.2f%%;height:%.2f%%">`+
-				`<span>%s</span></div>`,
-			b.x1, b.y1, math.Max(0, b.x2-b.x1), math.Max(0, b.y2-b.y1), e(b.text)))
-	}
-	shot = append(shot, "</div>")
-
-	left := []string{strings.Join(shot, "")}
-	if len(boxes) > 0 {
-		left = append(left, `<p><label><input type="checkbox" checked `+
-			`onchange="document.getElementById('shot').classList.toggle('show')"> `+
-			fmt.Sprintf("show %d ocr boxes</label></p>", len(boxes)))
-	}
-	mime := img["mime"]
-	if !truthy(mime) {
-		mime = ""
-	}
-	left = append(left, `<p class="muted mono">`+e(name)+`<br>`+pystr(img["width"])+`×`+
-		pystr(img["height"])+` `+e(mime)+` · `+commas(i64(img["bytes"]))+` bytes<br>`+
-		`sha256 `+e(img["sha256"])+`</p>`)
-	if len(paths) > 1 {
-		esc := make([]string, len(paths))
-		for i, p := range paths {
-			esc[i] = e(p)
-		}
-		left = append(left, fmt.Sprintf(
-			`<details><summary>%d paths</summary><p class="mono">%s</p></details>`,
-			len(paths), strings.Join(esc, "<br>")))
-	}
-
 	grouped := map[string][]Row{}
 	var seen []string
 	for _, r := range rows {
@@ -386,20 +413,104 @@ func (s *Store) RenderImage(imageID int64, sortKey string) (string, error) {
 		}
 		grouped[f] = append(grouped[f], r)
 	}
+
+	// ---- the sidebar: the values, then the facts --------------------------
+	side := imageSide(grouped)
+	mime := img["mime"]
+	if !truthy(mime) {
+		mime = ""
+	}
+	side = append(side, `<h3>information</h3><ul class="info">`+
+		`<li>`+pystr(img["width"])+`×`+pystr(img["height"])+` `+e(mime)+`</li>`+
+		`<li>`+commas(i64(img["bytes"]))+` bytes</li>`+
+		`<li class="mono" title="sha256">`+e(img["sha256"])+`</li>`+
+		`<li><a href="/file/`+pystr(imageID)+`">original file</a></li>`+
+		`<li><a href="/api/image/`+pystr(imageID)+`">json</a></li></ul>`)
+	if len(paths) > 0 {
+		esc := make([]string, len(paths))
+		for i, p := range paths {
+			esc[i] = e(p)
+		}
+		side = append(side, fmt.Sprintf(
+			`<details><summary>%d path(s)</summary><p class="mono">%s</p></details>`,
+			len(paths), strings.Join(esc, "<br>")))
+	}
+	var who []string
+	whoSeen := map[string]bool{}
+	for _, r := range rows {
+		k := pystr(r["pid"])
+		if !whoSeen[k] {
+			whoSeen[k] = true
+			who = append(who, `<a class="badge" href="/provenance/`+k+`">`+e(r["model"])+`</a>`)
+		}
+	}
+	if len(who) > 0 {
+		side = append(side, `<h3>models</h3><p>`+strings.Join(who, " ")+`</p>`)
+	}
+
+	// ---- the picture, fitted to the screen; a click shows it full size ---
+	var boxes []box
+	for _, r := range grouped["text"] {
+		if d, ok := r["detail"].(string); ok && d != "" {
+			boxes = append(boxes, ocrBoxes(d)...)
+		}
+	}
+	shot := []string{fmt.Sprintf(`<div class="shot show fit" id="shot">`+
+		`<img src="/file/%d" alt="%s" title="click: full size / fit to screen" `+
+		`onclick="document.getElementById('shot').classList.toggle('fit')">`, imageID, e(name))}
+	for _, b := range boxes {
+		shot = append(shot, fmt.Sprintf(
+			`<div class="box" style="left:%.2f%%;top:%.2f%%;width:%.2f%%;height:%.2f%%">`+
+				`<span>%s</span></div>`,
+			b.x1, b.y1, math.Max(0, b.x2-b.x1), math.Max(0, b.y2-b.y1), e(b.text)))
+	}
+	shot = append(shot, "</div>")
+	main := []string{`<h1 class="name">` + e(name) + `</h1>`, strings.Join(shot, "")}
+	if len(boxes) > 0 {
+		main = append(main, `<p class="muted"><label><input type="checkbox" checked `+
+			`onchange="document.getElementById('shot').classList.toggle('show')"> `+
+			fmt.Sprintf("show %d ocr boxes</label></p>", len(boxes)))
+	}
+
+	// ---- under it: what the models said about it in words ----------------
+	for _, f := range []struct{ field, title string }{
+		{"description", "descriptions"}, {"text", "text in the picture"},
+	} {
+		rs := grouped[f.field]
+		if len(rs) == 0 {
+			continue
+		}
+		main = append(main, `<h2>`+f.title+`</h2>`)
+		for _, r := range rs {
+			main = append(main, `<div class="said"><p class="prose">`+e(r["value"])+`</p>`+
+				`<p class="by"><a class="badge" href="/provenance/`+pystr(r["pid"])+`">`+e(r["model"])+
+				`</a> `+confBar(r["confidence"])+`</p></div>`)
+		}
+	}
+	for _, r := range grouped["verdict"] {
+		if truthy(r["detail"]) {
+			if d := verdictDetail(r["detail"]); d != "" {
+				main = append(main, `<h2>safety: `+e(r["value"])+` <span class="muted">(`+
+					e(r["model"])+`)</span></h2>`+d)
+			}
+		}
+	}
+
+	// ---- and everything, value by value, with who said it -----------------
 	order2 := append([]string{}, fieldOrder...)
 	for _, f := range seen {
 		if !contains(fieldOrder, f) {
 			order2 = append(order2, f)
 		}
 	}
-	var right []string
+	var all []string
 	for _, field := range order2 {
 		rs := grouped[field]
 		if len(rs) == 0 {
 			continue
 		}
-		right = append(right, fmt.Sprintf("<h2>%s <span class='muted'>(%d)</span></h2>", e(field), len(rs)))
-		right = append(right, "<table><tr>"+
+		all = append(all, fmt.Sprintf("<h2>%s <span class='muted'>(%d)</span></h2>", e(field), len(rs)))
+		all = append(all, "<table><tr>"+
 			sortHeader(imageID, "value", "value", sortKey)+
 			sortHeader(imageID, "conf", "conf", sortKey)+
 			sortHeader(imageID, "model", "model", sortKey)+"</tr>")
@@ -411,45 +522,113 @@ func (s *Store) RenderImage(imageID int64, sortKey string) (string, error) {
 			} else {
 				val = `<span class="prose">` + e(r["value"]) + `</span>`
 			}
-			if field == "verdict" && truthy(r["detail"]) {
-				val += verdictDetail(r["detail"])
-			}
 			if truthy(r["key"]) {
 				val = `<span class="muted">` + e(r["key"]) + `:</span> ` + val
 			}
 			if editMode {
 				val += removeButton(imageID, field, pystr(r["key"]), pystr(r["value"]))
 			}
-			right = append(right, "<tr><td>"+val+"</td><td>"+confBar(r["confidence"])+"</td>"+
+			all = append(all, "<tr><td>"+val+"</td><td>"+confBar(r["confidence"])+"</td>"+
 				`<td><a class="badge" href="/provenance/`+pystr(r["pid"])+`">`+
 				e(r["model"])+"</a></td></tr>")
 		}
-		right = append(right, "</table>")
+		all = append(all, "</table>")
+	}
+	if len(all) > 0 {
+		open := ""
+		if sortKey != "" || editMode {
+			open = " open"
+		}
+		main = append(main, fmt.Sprintf(`<details class="values" id="values"%s>`+
+			`<summary>every value, by model (%d)</summary>`, open, len(rows))+
+			strings.Join(all, "")+`</details>`)
 	}
 	removed, err := s.removedNote(imageID)
 	if err != nil {
 		return "", err
 	}
 	if removed != "" {
-		right = append(right, removed)
+		main = append(main, removed)
 	}
 	if zeros != 0 {
-		right = append(right, fmt.Sprintf(`<p class="muted">%d value(s) scored 0 and are not shown.</p>`, zeros))
+		main = append(main, fmt.Sprintf(`<p class="muted">%d value(s) scored 0 and are not shown.</p>`, zeros))
 	}
 	if len(fails) > 0 {
-		right = append(right, "<h2>failures</h2><table>")
+		main = append(main, "<h2>failures</h2><table>")
 		for _, f := range fails {
-			right = append(right, `<tr><td><span class="badge">`+e(f["model"])+`</span></td>`+
+			main = append(main, `<tr><td><span class="badge">`+e(f["model"])+`</span></td>`+
 				`<td class="mono">`+e(f["error"])+`</td></tr>`)
 		}
-		right = append(right, "</table>")
+		main = append(main, "</table>")
 	}
 	if editMode {
-		right = append(right, editPanel(imageID))
+		main = append(main, editPanel(imageID))
 	}
-	body := `<div class="detail"><div>` + strings.Join(left, "") + `</div>` +
-		`<div>` + strings.Join(right, "") + `</div></div>`
-	return page(name, body, ""), nil
+	return page(name, layout(strings.Join(side, ""), strings.Join(main, "")), ""), nil
+}
+
+// imageSide is an image page's sidebar: each value once, however many
+// models gave it, with the best confidence any of them had (the tooltip
+// says who said what).
+func imageSide(grouped map[string][]Row) []string {
+	var out []string
+	for _, g := range sideGroups {
+		type agg struct {
+			key, value string
+			best       float64
+			has        bool
+			who        []string
+		}
+		var vals []*agg
+		index := map[string]*agg{}
+		for _, r := range grouped[g.field] {
+			k, v := pystr(r["key"]), pystr(r["value"])
+			a := index[k+"\x00"+v]
+			if a == nil {
+				a = &agg{key: k, value: v}
+				index[k+"\x00"+v] = a
+				vals = append(vals, a)
+			}
+			w := pystr(r["model"])
+			if f, ok := numeric(r["confidence"]); ok && r["confidence"] != nil {
+				w += fmt.Sprintf(" %.2f", f)
+				if !a.has || f > a.best {
+					a.best, a.has = f, true
+				}
+			}
+			a.who = append(a.who, w)
+		}
+		if len(vals) == 0 {
+			continue
+		}
+		sort.SliceStable(vals, func(i, j int) bool {
+			if vals[i].has != vals[j].has {
+				return vals[i].has
+			}
+			if vals[i].best != vals[j].best {
+				return vals[i].best > vals[j].best
+			}
+			return strings.ToLower(vals[i].value) < strings.ToLower(vals[j].value)
+		})
+		out = append(out, "<h3>"+g.title+"</h3><ul>")
+		for _, a := range vals {
+			key := ""
+			if a.key != "" {
+				key = `<span class="muted">` + e(a.key) + `:</span> `
+			}
+			score := ""
+			if a.has {
+				score = fmt.Sprintf("%.2f", a.best)
+			}
+			if len(a.who) > 1 {
+				score += fmt.Sprintf(" ×%d", len(a.who))
+			}
+			out = append(out, `<li>`+key+`<a href="/value/`+g.field+`/`+quoteAll(a.value)+`">`+e(a.value)+`</a>`+
+				` <span class="n" title="`+e(strings.Join(a.who, ", "))+`">`+strings.TrimSpace(score)+`</span></li>`)
+		}
+		out = append(out, "</ul>")
+	}
+	return out
 }
 
 func contains(xs []string, x string) bool {
@@ -488,7 +667,7 @@ func (s *Store) RenderValue(field, value string, pageNo int) (string, error) {
 	base := "/value/" + field + "/" + quoteAll(value)
 	body, err := s.gridPage(head, rows, more, pageNo, "<p class='muted'>nothing.</p>",
 		fmt.Sprintf(`<a href="%s?page=%d">← newer</a>`, base, pageNo-1),
-		fmt.Sprintf(`<a href="%s?page=%d">older →</a>`, base, pageNo+1))
+		fmt.Sprintf(`<a href="%s?page=%d">older →</a>`, base, pageNo+1), qs)
 	if err != nil {
 		return "", err
 	}

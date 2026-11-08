@@ -27,14 +27,15 @@ import (
 // arriving at once must not decode 48 of them in parallel.
 var thumbSlots = make(chan struct{}, runtime.NumCPU())
 
-// thumbnail returns the path of a cached square thumbnail, making it on the
-// first request; "" means serve the original (the format is one Go cannot
+// thumbnail returns the path of a cached thumbnail -- the whole picture,
+// fitted inside size x size -- making it on the first request; "" means serve the original (the format is one Go cannot
 // decode, the file is broken, or there is no cache dir).
 func thumbnail(path, sha string, size int, cacheDir string) string {
 	if cacheDir == "" || len(sha) < 2 {
 		return ""
 	}
-	out := filepath.Join(cacheDir, sha[:2], fmt.Sprintf("%s_%d.jpg", sha, size))
+	// "fit": the square crops an earlier version cached are another file
+	out := filepath.Join(cacheDir, sha[:2], fmt.Sprintf("%s_fit%d.jpg", sha, size))
 	if _, err := os.Stat(out); err == nil {
 		return out
 	}
@@ -56,17 +57,15 @@ func makeThumb(src, out string, size int) error {
 	if err != nil {
 		return err
 	}
-	// ImageOps.fit: the centred square, scaled. The centre square is the
-	// same square under any rotation or flip, so the EXIF orientation can
-	// be applied after scaling, to 256x256 pixels instead of 13 MP.
+	// the whole picture, its longer side scaled to size (never up). A turn
+	// or flip doesn't change the longer side, so the EXIF orientation can be
+	// applied after scaling, to a few hundred pixels instead of 13 MP.
 	b := im.Bounds()
-	side := min(b.Dx(), b.Dy())
-	crop := image.Rect(0, 0, side, side).Add(b.Min).
-		Add(image.Pt((b.Dx()-side)/2, (b.Dy()-side)/2))
-	dst := image.NewRGBA(image.Rect(0, 0, size, size))
+	w, h := fit(b.Dx(), b.Dy(), size)
+	dst := image.NewRGBA(image.Rect(0, 0, w, h))
 	// transparent pixels onto white, rather than whatever colour they hold
 	draw.Draw(dst, dst.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
-	draw.CatmullRom.Scale(dst, dst.Bounds(), im, crop, draw.Over, nil)
+	draw.CatmullRom.Scale(dst, dst.Bounds(), im, b, draw.Over, nil)
 	final := orient(dst, exifOrientation(data))
 
 	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
@@ -87,31 +86,45 @@ func makeThumb(src, out string, size int) error {
 	return os.Rename(tmp.Name(), out)
 }
 
-// orient applies an EXIF orientation (1..8) to a square image.
+// fit scales w x h so the longer side is at most size, keeping the aspect.
+func fit(w, h, size int) (int, int) {
+	long := max(w, h)
+	if long <= size || long == 0 {
+		return max(w, 1), max(h, 1)
+	}
+	scale := func(n int) int { return max(1, (n*size+long/2)/long) }
+	return scale(w), scale(h)
+}
+
+// orient applies an EXIF orientation (1..8); 5..8 swap width and height.
 func orient(src *image.RGBA, o int) image.Image {
 	if o < 2 || o > 8 {
 		return src
 	}
-	n := src.Bounds().Dx()
-	dst := image.NewRGBA(src.Bounds())
-	for y := 0; y < n; y++ {
-		for x := 0; x < n; x++ {
+	W, H := src.Bounds().Dx(), src.Bounds().Dy()
+	dw, dh := W, H
+	if o >= 5 {
+		dw, dh = H, W
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, dw, dh))
+	for y := 0; y < dh; y++ {
+		for x := 0; x < dw; x++ {
 			var sx, sy int
 			switch o {
 			case 2: // mirrored
-				sx, sy = n-1-x, y
+				sx, sy = W-1-x, y
 			case 3: // rotated 180
-				sx, sy = n-1-x, n-1-y
+				sx, sy = W-1-x, H-1-y
 			case 4: // flipped
-				sx, sy = x, n-1-y
+				sx, sy = x, H-1-y
 			case 5: // transposed
 				sx, sy = y, x
 			case 6: // shot rotated 90 clockwise: display it turned back
-				sx, sy = y, n-1-x
+				sx, sy = y, H-1-x
 			case 7: // transversed
-				sx, sy = n-1-y, n-1-x
+				sx, sy = W-1-y, H-1-x
 			case 8:
-				sx, sy = n-1-y, x
+				sx, sy = W-1-y, x
 			}
 			dst.SetRGBA(x, y, src.RGBAAt(sx, sy))
 		}

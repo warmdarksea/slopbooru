@@ -121,7 +121,7 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) error {
 		if err != nil {
 			return err
 		}
-		text, err := s.store.RenderImage(id, arg(q, "sort", "conf"))
+		text, err := s.store.RenderImage(id, arg(q, "sort", ""))
 		if err == nil && text == "" {
 			sendHTML(w, page("404", "<h1>no such image</h1>", ""), 404)
 			return nil

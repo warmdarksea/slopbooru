@@ -4,8 +4,17 @@ A small booru for browsing what a fleet of image models said about a
 directory of pictures: tags, characters, ratings, descriptions, OCR'd text
 with its boxes, safety verdicts, each value with its model and confidence.
 It reads the sqlite db written by an image recognition pipeline and serves
-it as plain html. Search, facets and thumbnails included, and no JavaScript
-framework or external assets.
+it as plain html, laid out like a booru: the tags, characters, sources,
+moods and hazards on a sidebar to the left, thumbnails beside it, and on an
+image's page the picture fitted to the screen (click for full size) with
+the models' descriptions underneath. No JavaScript framework, no external
+assets.
+
+The pipeline that writes the db is in this repository too: **imgrec**
+([imgrec/](imgrec/), design in [imgrec/DESIGN.md](imgrec/DESIGN.md)), a
+scheduler and HTTP service in front of seven vision models on one GPU.
+The booru is a plain download for any platform; imgrec is built with nix
+only (see [The backend](#the-backend-imgrec)).
 
 One file per platform with nothing to install: static binaries for Linux
 (any distro, any glibc or none) and Windows 10+, on amd64 and arm64.
@@ -38,7 +47,8 @@ Without `--images` it looks for each picture at the path recorded in the db.
 
 Search box: `marisa` (prefix match over every value), `rating:safe`,
 `tag:solo`, `subject:"maid girl"`, `"a phrase"`, `model:pixai tag:marisa`
-(what *that* model tagged), `field:description`.
+(what *that* model tagged), `field:description`. The `+` beside a value in
+the sidebar adds it to the current search.
 
 ## Editing by hand
 
@@ -89,5 +99,6 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" .
 - `go run ./cmd/slopcheck -bin ./slopbooru`: end to end against a real
   binary. It builds a fixture db and pictures, moves and renames the
   pictures, starts the server, and checks every file by hash, every
-  thumbnail, the routes, and the hash cache across restarts. Add
+  thumbnail, the routes, and the hash cache across restarts, then crawls
+  ~600 pages of each fixture db (with and without FTS5) for errors. Add
   `-wrap wine -winpaths` to check the Windows build under wine.

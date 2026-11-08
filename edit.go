@@ -32,8 +32,7 @@ import (
 
 // visible is annotations minus everything removed by hand (and minus the
 // removal markers themselves, which match their own condition). With no
-// manual rows it is exactly the table, which keeps the pages identical to
-// the python booru's.
+// manual rows it is exactly the table.
 const visible = "(SELECT * FROM annotations WHERE NOT EXISTS (" +
 	"SELECT 1 FROM annotations m WHERE m.provenance_id IN " +
 	"(SELECT id FROM provenances WHERE model = 'manual') " +

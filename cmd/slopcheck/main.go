@@ -2,14 +2,13 @@
 //
 //	slopcheck -bin ./slopbooru
 //	slopcheck -bin ./slopbooru.exe -wrap wine -winpaths
-//	slopcheck -bin ./slopbooru -ref 'python3 booru.py'
 //
 // It builds the fixture, lays the pictures out somewhere else under other
 // names (so they can only be found by content), starts the binary, and
 // checks every file, every thumbnail, the routes, the hash cache across
-// restarts. With -ref it also starts a reference implementation (the
-// Python booru this was ported from) on the same dbs and requires every
-// page to be byte-identical but for the brand name.
+// restarts -- then crawls every page of both dbs (FTS5 and the LIKE
+// fallback): every search, image, value and provenance page must render
+// whole, and none may fail.
 package main
 
 import (
@@ -43,7 +42,6 @@ var (
 	bin      = flag.String("bin", "", "the booru binary under test")
 	wrap     = flag.String("wrap", "", "run it through this, e.g. wine")
 	winpaths = flag.Bool("winpaths", false, "pass paths as Z:\\... (the binary is a windows one under wine)")
-	ref      = flag.String("ref", "", "reference implementation to diff pages against, e.g. 'python3 booru.py'")
 	work     = flag.String("work", "", "scratch directory (default: a new temp dir)")
 	timeout  = flag.Duration("timeout", 3*time.Minute, "how long a server may take to come up")
 	keep     = flag.Bool("keep", false, "keep the scratch directory")
@@ -263,10 +261,8 @@ func main() {
 	}
 	s.stop()
 
-	if *ref != "" {
-		for _, db := range []string{fx.DB, fx.DBLike} {
-			compare(db, shaOf, dir, thumbs)
-		}
+	for _, db := range []string{fx.DB, fx.DBLike} {
+		crawl(db, shaOf, thumbs)
 	}
 
 	if failures > 0 {
@@ -314,6 +310,10 @@ func checkThumbs(base string, shaOf map[int64]string, have map[string][]byte, fx
 		if _, ok := have[sha]; !ok {
 			continue
 		}
+		orig, _, err := image.DecodeConfig(bytes.NewReader(have[sha]))
+		if err != nil {
+			continue // a format Go can't decode: the original is served instead
+		}
 		for _, size := range []int{256, 64} {
 			r := get(base, fmt.Sprintf("/thumb/%d?s=%d", id, size))
 			im, format, err := image.Decode(bytes.NewReader(r.body))
@@ -321,8 +321,15 @@ func checkThumbs(base string, shaOf map[int64]string, have map[string][]byte, fx
 				fail("/thumb/%d?s=%d: code %d type %s format %s err %v", id, size, r.code, r.ctype, format, err)
 				continue
 			}
-			if b := im.Bounds(); b.Dx() != size || b.Dy() != size {
-				fail("/thumb/%d?s=%d is %dx%d", id, size, b.Dx(), b.Dy())
+			// the whole picture: the longer side fitted to size (never up),
+			// the aspect kept to within rounding (either way round: a turned
+			// shot is turned back)
+			b := im.Bounds()
+			long, short := max(orig.Width, orig.Height), min(orig.Width, orig.Height)
+			want := min(size, long)
+			gotLong, gotShort := max(b.Dx(), b.Dy()), min(b.Dx(), b.Dy())
+			if gotLong != want || absInt(gotShort*long-short*want) > long {
+				fail("/thumb/%d?s=%d is %dx%d, from %dx%d", id, size, b.Dx(), b.Dy(), orig.Width, orig.Height)
 			}
 		}
 	}
@@ -339,7 +346,12 @@ func checkThumbs(base string, shaOf map[int64]string, have map[string][]byte, fx
 				fail("rotated thumb: %v", err)
 				continue
 			}
-			top, bottom := im.At(32, 4), im.At(32, 60)
+			b := im.Bounds() // stored 40x20, shown upright: 20x40
+			if b.Dy() <= b.Dx() {
+				fail("rotated thumb is %dx%d, want portrait", b.Dx(), b.Dy())
+				continue
+			}
+			top, bottom := im.At(b.Dx()/2, b.Dy()/8), im.At(b.Dx()/2, b.Dy()*7/8)
 			tr, _, tb, _ := top.RGBA()
 			br, _, bb, _ := bottom.RGBA()
 			if !(tr > 0xc000 && tb < 0x4000 && bb > 0xc000 && br < 0x4000) {
@@ -373,9 +385,10 @@ func checkRoutes(base string) {
 	}
 }
 
-// compare serves db from the binary and from the reference, and diffs
-// every page either could be asked for.
-func compare(dbPath string, shaOf map[int64]string, dir, thumbs string) {
+// crawl serves db and asks for every page there is: each must answer
+// without a server error, and an html page must be whole -- the frame, the
+// sidebar layout where there is one, and no error text in it.
+func crawl(dbPath string, shaOf map[int64]string, thumbs string) {
 	db, err := sql.Open("sqlite", dbPath)
 	must(err)
 	defer db.Close()
@@ -416,40 +429,46 @@ func compare(dbPath string, shaOf map[int64]string, dir, thumbs string) {
 	}
 	rows.Close()
 
-	pa, pb := freePort(), freePort()
+	pa := freePort()
 	a := start(booru(dbPath, "", thumbs, pa), pa)
 	defer a.stop()
-	refArgv := append(strings.Fields(*ref), "--db", dbPath, "--host", "127.0.0.1",
-		"--port", fmt.Sprint(pb), "--thumbs", filepath.Join(dir, "ref-thumbs"))
-	b := start(refArgv, pb)
-	defer b.stop()
 
-	brands := regexp.MustCompile(`slopbooru|llm-booru`)
-	diffs := 0
+	// the deliberately bad ones; everything else is a page that exists
+	bad := map[string]int{"/nope": 404, "/image/x": 400, "/image/99999": 404,
+		"/provenance/99999": 404}
+	failed := 0
 	for _, u := range urls {
-		ra, rb := get(a.base, u), get(b.base, u)
-		ba, bb := brands.ReplaceAll(ra.body, []byte("BRAND")), brands.ReplaceAll(rb.body, []byte("BRAND"))
-		if ra.code != rb.code || ra.ctype != rb.ctype || !bytes.Equal(ba, bb) {
-			diffs++
-			if diffs <= 5 {
-				fail("%s differs from the reference: %d %s vs %d %s\n%s", u, ra.code, ra.ctype, rb.code, rb.ctype, firstDiff(ba, bb))
+		r := get(a.base, u)
+		want, isBad := bad[u]
+		problem := ""
+		switch {
+		case r.code >= 500:
+			problem = "server error"
+		case isBad && r.code != want:
+			problem = fmt.Sprintf("want %d", want)
+		case !isBad && r.code != 200:
+			problem = "want 200"
+		case strings.HasPrefix(r.ctype, "text/html") && !bytes.HasSuffix(bytes.TrimSpace(r.body), []byte("</html>")):
+			problem = "page cut short"
+		case bytes.Contains(r.body, []byte("db error")):
+			problem = "db error in the page"
+		case r.code == 200 && (u == "/" || strings.HasPrefix(u, "/?") || strings.HasPrefix(u, "/image/") ||
+			strings.HasPrefix(u, "/value/")) && !bytes.Contains(r.body, []byte(`<aside class="side">`)):
+			problem = "no sidebar"
+		case r.code == 200 && strings.HasPrefix(u, "/image/") && !bytes.Contains(r.body, []byte(`id="shot"`)):
+			problem = "no picture"
+		}
+		if problem != "" {
+			failed++
+			if failed <= 5 {
+				fail("%s: %d %s: %s", u, r.code, r.ctype, problem)
 			}
 		}
 	}
-	if diffs > 5 {
-		fail("... %d page(s) differ in all", diffs)
+	if failed > 5 {
+		fail("... %d page(s) wrong in all", failed)
 	}
-	say("%s: %d page(s) compared with the reference, %d differ", filepath.Base(dbPath), len(urls), diffs)
-}
-
-func firstDiff(a, b []byte) string {
-	i := 0
-	for i < len(a) && i < len(b) && a[i] == b[i] {
-		i++
-	}
-	lo := max(0, i-80)
-	clip := func(x []byte) string { return string(x[lo:min(len(x), i+120)]) }
-	return fmt.Sprintf("  got: ...%s\n  ref: ...%s", clip(a), clip(b))
+	say("%s: %d page(s) crawled, %d wrong", filepath.Base(dbPath), len(urls), failed)
 }
 
 func urlQuote(s string) string {
@@ -553,4 +572,11 @@ func checkEdit(fx *fixture.Fixture, pics, dir string, port int) {
 	if _, err := os.Stat(saved); err != nil {
 		fail("deleting the image must leave the file: %v", err)
 	}
+}
+
+func absInt(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
 }
