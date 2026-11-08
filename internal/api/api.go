@@ -1,26 +1,28 @@
-// Package api is imgrec's HTTP interface. A job is one picture on one
-// model; every call is idempotent, so a client's "queue" is just its own
-// list of inputs, and re-running a client is how it polls.
+// Package api is imgrec's HTTP interface: two calls, and everything else
+// follows from their types.
 //
-//	GET    /v1/models                       what this server can run
-//	POST   /v1/jobs {image, model}          by hash: 200 + answer | 202 queued | 404 need_image
-//	POST   /v1/jobs multipart               image (sha), models, file: the picture itself
-//	GET    /v1/jobs/{model}/{sha}?wait=N    200 answer | 202 pending | 404
-//	DELETE /v1/jobs/{model}/{sha}           withdraw your interest
-//	GET    /v1/queue                        per model: state, in flight, your pending jobs
+//	ask    :: [(ImageHash, Model)] -> [Maybe Answer]     POST /v1/ask[?wait=N]
+//	submit :: Image -> [Model] -> WorkingOnIt            POST /v1/submit (multipart)
 //
-// Pictures travel only when needed: ask by hash first, and send the bytes
-// on need_image. The server deletes an uploaded picture once no job needs
-// it; the answers stay.
+// ask is a pure query: it never creates work. An Answer is what a model
+// said -- or, once a job has run out of attempts, why it couldn't (success
+// false), so a broken picture is answered rather than pending for ever.
+// Nothing means no answer *for you* yet: not asked, still running, or a
+// picture you have never sent -- the same Nothing either way, so a hash
+// alone tells a client nothing about anyone else's pictures. With ?wait=N
+// the call holds until every answer is Just, or N seconds pass.
 //
-// Every call carries Authorization: Bearer <token>. Answers are shared --
-// the same picture is answered once, whoever asks -- but a client gets
-// one by hash only for pictures it has itself sent at least once.
-// Otherwise it is need_image, exactly as if nothing were cached, so a hash
-// alone tells nobody whether anyone else ever submitted that picture. (A
-// client holding the bytes can still tell, from the instant answer, that
-// someone ran them: the price of sharing answers at all.) An admin sees
-// everything.
+// submit is the only call that creates work: the picture (verified
+// against its hash) and the models to run it on; one upload covers them
+// all. It answers 202 and nothing more -- ask again for the answers.
+// Answers are shared: a picture two clients submit runs once. The server
+// deletes an uploaded picture once no job needs it; the answers stay.
+//
+// So a client is: ask everything; submit each picture whose answers came
+// back Nothing; ask again, waiting, until every answer is Just.
+//
+// Also: GET /v1/models (what can be asked), GET /v1/queue (what's running).
+// Every call carries Authorization: Bearer <token>; an admin sees all.
 package api
 
 import (
@@ -29,7 +31,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -43,12 +44,13 @@ import (
 )
 
 type Server struct {
-	P         *pipeline.Pipeline
-	Auth      *auth.Auth
-	Sched     *sched.Scheduler
-	MaxUpload int64         // bytes per picture
-	MaxWait   time.Duration // cap on ?wait=
-	Logf      func(format string, a ...any)
+	P            *pipeline.Pipeline
+	Auth         *auth.Auth
+	Sched        *sched.Scheduler
+	MaxUpload    int64         // bytes per picture
+	MaxWait      time.Duration // cap on ?wait=
+	MaxQuestions int           // per ask (default 1024)
+	Logf         func(format string, a ...any)
 }
 
 var shaRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -79,22 +81,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, 401, "unknown token")
 		return
 	}
-	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	switch {
+	case r.Method == "POST" && r.URL.Path == "/v1/ask":
+		s.ask(w, r, c)
+	case r.Method == "POST" && r.URL.Path == "/v1/submit":
+		s.submit(w, r, c)
 	case r.Method == "GET" && r.URL.Path == "/v1/models":
 		s.models(w)
-	case r.Method == "POST" && r.URL.Path == "/v1/jobs":
-		if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
-			s.postJobWithImage(w, r, c)
-		} else {
-			s.postJob(w, r, c)
-		}
-	case len(parts) == 4 && parts[0] == "v1" && parts[1] == "jobs" && (r.Method == "GET" || r.Method == "DELETE"):
-		s.job(w, r, c, parts[2], parts[3])
 	case r.Method == "GET" && r.URL.Path == "/v1/queue":
 		s.queue(w, c)
 	default:
-		fail(w, 404, "no such endpoint: %s %s", r.Method, r.URL.Path)
+		fail(w, 404, "no such endpoint: %s %s (POST /v1/ask, POST /v1/submit)", r.Method, r.URL.Path)
 	}
 }
 
@@ -111,26 +108,35 @@ func (s *Server) models(w http.ResponseWriter) {
 	writeJSON(w, 200, map[string]any{"models": out})
 }
 
-// view is a job's answer as the API returns it.
-func (s *Server) view(model, sha string, res pipeline.Result) (int, map[string]any) {
-	out := map[string]any{"status": res.Status.String(), "model": model, "image": sha}
+// Question is one (picture, model) pair.
+type Question struct {
+	Image string `json:"image"`
+	Model string `json:"model"`
+}
+
+// answer is Just an answer, or nil (Nothing). No side effects.
+func (s *Server) answer(c auth.Client, q Question) (map[string]any, error) {
+	sees, err := s.Auth.Sees(c, q.Image)
+	if err != nil || !sees {
+		return nil, err // not your picture: Nothing, exactly as if unanswered
+	}
+	res, exists, err := s.P.Status(q.Model, q.Image)
+	if err != nil || !exists {
+		return nil, err
+	}
 	switch res.Status {
 	case pipeline.Done:
-		out["record"] = recordMeta(res.Record)
-		if c, ok := s.P.Contribution(model, res.Record); ok {
-			out["result"] = map[string]any{"success": c.Success, "fields": c.Fields,
-				"detail": c.Detail, "error": c.Error}
+		out := map[string]any{"image": q.Image, "model": q.Model, "record": recordMeta(res.Record)}
+		if c, ok := s.P.Contribution(q.Model, res.Record); ok {
+			out["success"], out["fields"], out["detail"], out["error"] = c.Success, c.Fields, c.Detail, c.Error
+		} else {
+			out["success"], out["error"] = false, "the answer does not parse"
 		}
-		return 200, out
+		return out, nil
 	case pipeline.Failed:
-		out["error"] = res.Error
-		return 200, out
-	case pipeline.NeedImage:
-		out["need_image"] = true
-		out["error"] = "send the picture: POST /v1/jobs as multipart, with the file"
-		return 404, out
+		return map[string]any{"image": q.Image, "model": q.Model, "success": false, "error": res.Error}, nil
 	}
-	return 202, out
+	return nil, nil
 }
 
 func recordMeta(r *records.Record) map[string]any {
@@ -138,106 +144,89 @@ func recordMeta(r *records.Record) map[string]any {
 		"elapsed": r.Elapsed, "engine": r.Engine, "at": r.At}
 }
 
-func location(model, sha string) string {
-	return "/v1/jobs/" + url.PathEscape(model) + "/" + sha
-}
-
-// check validates a model and a hash; sees is whether this client has sent
-// that picture (or is admin) -- what entitles it to answers by hash.
-func (s *Server) check(w http.ResponseWriter, c auth.Client, model, sha string) (sees, ok bool) {
-	if _, exists := s.P.Specs[model]; !exists {
-		fail(w, 404, "no model %q (GET /v1/models)", model)
-		return false, false
+func (s *Server) ask(w http.ResponseWriter, r *http.Request, c auth.Client) {
+	limit := s.MaxQuestions
+	if limit == 0 {
+		limit = 1024
 	}
-	if !shaRE.MatchString(sha) {
-		fail(w, 400, "not a sha256: %q", sha)
-		return false, false
-	}
-	sees, err := s.Auth.Sees(c, sha)
-	if err != nil {
-		fail(w, 500, "%v", err)
-		return false, false
-	}
-	return sees, true
-}
-
-// answer runs intake for one job and says what came of it.
-func (s *Server) answer(c auth.Client, model, sha string) (int, map[string]any, error) {
-	res, err := s.P.Intake(model, sha, c.Name)
-	if err != nil {
-		return 0, nil, err
-	}
-	if res.Status == pipeline.Done {
-		// an answer that arrived another way (another machine's records)
-		// belongs in the store too; idempotent
-		if err := s.P.Materialize(model, sha, res.Record); err != nil && s.Logf != nil {
-			s.Logf("%s %s: %v", model, sha[:12], err)
-		}
-	}
-	code, out := s.view(model, sha, res)
-	if code == 202 {
-		out["location"] = location(model, sha)
-	}
-	return code, out, nil
-}
-
-func (s *Server) postJob(w http.ResponseWriter, r *http.Request, c auth.Client) {
 	var req struct {
-		Image string `json:"image"`
-		Model string `json:"model"`
+		Questions []Question `json:"questions"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, int64(limit)*256)).Decode(&req); err != nil {
 		fail(w, 400, "body: %v", err)
 		return
 	}
-	sees, ok := s.check(w, c, req.Model, req.Image)
-	if !ok {
+	if len(req.Questions) > limit {
+		fail(w, 400, "at most %d questions per ask", limit)
 		return
 	}
-	if !sees {
-		// never sent by this client: need_image, whether or not anything is
-		// cached -- a hash alone must not reveal that anyone else sent it
-		code, out := s.view(req.Model, req.Image, pipeline.Result{Status: pipeline.NeedImage})
-		writeJSON(w, code, out)
-		return
+	for _, q := range req.Questions {
+		if _, ok := s.P.Specs[q.Model]; !ok {
+			fail(w, 400, "no model %q (GET /v1/models)", q.Model)
+			return
+		}
+		if !shaRE.MatchString(q.Image) {
+			fail(w, 400, "not a sha256: %q", q.Image)
+			return
+		}
 	}
-	code, out, err := s.answer(c, req.Model, req.Image)
-	if err != nil {
-		fail(w, 500, "%v", err)
-		return
+	wait, _ := strconv.ParseFloat(r.URL.Query().Get("wait"), 64)
+	deadline := time.Now().Add(min(time.Duration(wait*float64(time.Second)), s.MaxWait))
+	answers := make([]map[string]any, len(req.Questions))
+	for {
+		pending := 0
+		for i, q := range req.Questions {
+			if answers[i] != nil {
+				continue
+			}
+			a, err := s.answer(c, q)
+			if err != nil {
+				fail(w, 500, "%v", err)
+				return
+			}
+			if a == nil {
+				pending++
+			}
+			answers[i] = a
+		}
+		if pending == 0 || !time.Now().Before(deadline) {
+			out := make([]any, len(answers))
+			for i, a := range answers {
+				if a != nil {
+					out[i] = a
+				} // else null: Nothing
+			}
+			writeJSON(w, 200, map[string]any{"answers": out})
+			return
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(250 * time.Millisecond):
+		}
 	}
-	if code == 202 {
-		w.Header().Set("Location", location(req.Model, req.Image))
-	}
-	writeJSON(w, code, out)
 }
 
-// postJobWithImage is a job with the picture attached (multipart: field
-// image = its sha256, field models = one or more model names, file part
-// file = the bytes), for after a need_image. One upload serves every model
-// named. 202 if any job is queued, else 200; the body lists each.
-func (s *Server) postJobWithImage(w http.ResponseWriter, r *http.Request, c auth.Client) {
+// submit takes a picture and the models to run it on (multipart: field
+// image = its sha256, field models = names, comma-separated or repeated,
+// then file = the bytes). 202: working on it.
+func (s *Server) submit(w http.ResponseWriter, r *http.Request, c auth.Client) {
 	r.Body = http.MaxBytesReader(w, r.Body, s.MaxUpload+1<<20)
 	mr, err := r.MultipartReader()
 	if err != nil {
-		fail(w, 400, "%v", err)
+		fail(w, 400, "submit is multipart: image, models, file (%v)", err)
 		return
 	}
 	var sha string
 	var models []string
-	var uploaded bool
+	uploaded := false
 	for {
 		part, err := mr.NextPart()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			var tooBig *http.MaxBytesError
-			if errors.As(err, &tooBig) {
-				fail(w, 413, "a picture is at most %d bytes", s.MaxUpload)
-			} else {
-				fail(w, 400, "%v", err)
-			}
+			s.uploadError(w, err)
 			return
 		}
 		switch part.FormName() {
@@ -252,23 +241,19 @@ func (s *Server) postJobWithImage(w http.ResponseWriter, r *http.Request, c auth
 				}
 			}
 		case "file":
-			// the fields come first: the hash must be known to verify the bytes
+			// the fields come first: the hash must be known to check the bytes
 			if !shaRE.MatchString(sha) || len(models) == 0 {
 				fail(w, 400, "send the image (sha256) and models fields before the file")
 				return
 			}
 			for _, m := range models {
-				if _, ok := s.check(w, c, m, sha); !ok {
+				if _, ok := s.P.Specs[m]; !ok {
+					fail(w, 400, "no model %q (GET /v1/models)", m)
 					return
 				}
 			}
 			if _, err := s.P.Upload(part, sha); err != nil {
-				var tooBig *http.MaxBytesError
-				if errors.As(err, &tooBig) {
-					fail(w, 413, "a picture is at most %d bytes", s.MaxUpload)
-				} else {
-					fail(w, 400, "%v", err)
-				}
+				s.uploadError(w, err)
 				return
 			}
 			if _, err := s.Auth.Own(c.Name, sha); err != nil {
@@ -282,66 +267,29 @@ func (s *Server) postJobWithImage(w http.ResponseWriter, r *http.Request, c auth
 		fail(w, 400, "no file part")
 		return
 	}
-	code := 200
-	var jobs []map[string]any
 	for _, m := range models {
-		jc, out, err := s.answer(c, m, sha)
+		res, err := s.P.Intake(m, sha, c.Name)
 		if err != nil {
 			fail(w, 500, "%v", err)
 			return
 		}
-		if jc == 202 {
-			code = 202
+		if res.Status == pipeline.Done {
+			// an answer that arrived another way (another machine's
+			// records) belongs in the store too; idempotent
+			if err := s.P.Materialize(m, sha, res.Record); err != nil && s.Logf != nil {
+				s.Logf("%s %s: %v", m, sha[:12], err)
+			}
 		}
-		jobs = append(jobs, out)
 	}
-	writeJSON(w, code, map[string]any{"image": sha, "jobs": jobs})
+	writeJSON(w, 202, map[string]any{"image": sha, "models": models, "working": true})
 }
 
-func (s *Server) job(w http.ResponseWriter, r *http.Request, c auth.Client, model, sha string) {
-	model, _ = url.PathUnescape(model)
-	sees, ok := s.check(w, c, model, sha)
-	if !ok {
-		return
-	}
-	if !sees {
-		fail(w, 404, "no job %s on %s", sha, model)
-		return
-	}
-	if r.Method == "DELETE" {
-		if err := s.P.Cancel(model, sha, c.Name); err != nil {
-			fail(w, 500, "%v", err)
-			return
-		}
-		w.WriteHeader(204)
-		return
-	}
-	wait, _ := strconv.ParseFloat(r.URL.Query().Get("wait"), 64)
-	deadline := time.Now().Add(min(time.Duration(wait*float64(time.Second)), s.MaxWait))
-	for {
-		res, exists, err := s.P.Status(model, sha)
-		if err != nil {
-			fail(w, 500, "%v", err)
-			return
-		}
-		if !exists {
-			fail(w, 404, "no job %s on %s (POST /v1/jobs to ask)", sha, model)
-			return
-		}
-		if res.Status != pipeline.Queued || !time.Now().Before(deadline) {
-			code, out := s.view(model, sha, res)
-			if code == 202 {
-				w.Header().Set("Location", location(model, sha))
-				w.Header().Set("Retry-After", "5")
-			}
-			writeJSON(w, code, out)
-			return
-		}
-		select {
-		case <-r.Context().Done():
-			return
-		case <-time.After(250 * time.Millisecond):
-		}
+func (s *Server) uploadError(w http.ResponseWriter, err error) {
+	var tooBig *http.MaxBytesError
+	if errors.As(err, &tooBig) {
+		fail(w, 413, "a picture is at most %d bytes", s.MaxUpload)
+	} else {
+		fail(w, 400, "%v", err)
 	}
 }
 

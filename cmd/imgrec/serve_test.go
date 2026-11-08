@@ -6,13 +6,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -54,8 +56,27 @@ func shaOf(data []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
-// upload is a job with the picture attached (after a need_image).
-func (c apiClient) upload(sha string, data []byte, models ...string) (int, map[string]any) {
+// ask is POST /v1/ask: the answers, in order (nil: Nothing).
+func (c apiClient) ask(wait int, qs ...[2]string) (int, []map[string]any) {
+	c.t.Helper()
+	var questions []map[string]string
+	for _, q := range qs {
+		questions = append(questions, map[string]string{"image": q[0], "model": q[1]})
+	}
+	body, _ := json.Marshal(map[string]any{"questions": questions})
+	code, out, _ := c.call("POST", fmt.Sprintf("/v1/ask?wait=%d", wait), body)
+	var answers []map[string]any
+	if raw, ok := out["answers"].([]any); ok {
+		for _, a := range raw {
+			m, _ := a.(map[string]any)
+			answers = append(answers, m)
+		}
+	}
+	return code, answers
+}
+
+// submit is POST /v1/submit: the picture and the models to run it on.
+func (c apiClient) submit(sha string, data []byte, models ...string) int {
 	c.t.Helper()
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
@@ -64,17 +85,15 @@ func (c apiClient) upload(sha string, data []byte, models ...string) (int, map[s
 	fw, _ := mw.CreateFormFile("file", "x.png")
 	fw.Write(data)
 	mw.Close()
-	req, _ := http.NewRequest("POST", c.base+"/v1/jobs", &body)
+	req, _ := http.NewRequest("POST", c.base+"/v1/submit", &body)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		c.t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	var out map[string]any
-	json.NewDecoder(resp.Body).Decode(&out)
-	return resp.StatusCode, out
+	resp.Body.Close()
+	return resp.StatusCode
 }
 
 func TestServe(t *testing.T) {
@@ -112,6 +131,9 @@ func TestServe(t *testing.T) {
 		return data, shaOf(data)
 	}
 	onDisk := func(sha string) bool { return p.Images.Path(sha) != "" }
+	jobs := func(model, sha string) string {
+		return query(t, f.db, "SELECT COUNT(*) FROM jobs WHERE model = '"+model+"' AND image_sha = '"+sha+"'")[0][0]
+	}
 
 	// tokens
 	if code, _, h := (apiClient{t, ts.URL, ""}).call("GET", "/v1/models", nil); code != 401 || h.Get("WWW-Authenticate") == "" {
@@ -125,70 +147,99 @@ func TestServe(t *testing.T) {
 	}
 
 	p00, s00 := read("p00.png")
-	// by hash, nothing anywhere: need_image
-	if code, res, _ := A.call("POST", "/v1/jobs", job(s00, "pixai")); code != 404 || res["need_image"] != true {
-		t.Fatalf("hash-only, never seen: %d %v", code, res)
+	// ask: Nothing, and nothing created
+	if code, ans := A.ask(0, [2]string{s00, "pixai"}); code != 200 || len(ans) != 1 || ans[0] != nil {
+		t.Fatalf("ask, never seen: %d %v", code, ans)
 	}
-	// with the picture: queued, then answered
-	code, res := A.upload(s00, p00, "pixai")
-	if code != 202 {
-		t.Fatalf("upload with the job: %d %v", code, res)
+	// submit, then ask (waiting): Just
+	if code := A.submit(s00, p00, "pixai"); code != 202 {
+		t.Fatalf("submit: %d", code)
 	}
-	if code, res, _ := A.call("GET", "/v1/jobs/pixai/"+s00+"?wait=20", nil); code != 200 || res["status"] != "done" {
-		t.Fatalf("alice's answer: %d %v", code, res)
+	if code, ans := A.ask(20, [2]string{s00, "pixai"}); code != 200 || ans[0] == nil || ans[0]["success"] != true {
+		t.Fatalf("alice's answer: %d %v", code, ans)
 	}
-	// alice again, by hash: answered without sending anything
-	if code, res, _ := A.call("POST", "/v1/jobs", job(s00, "pixai")); code != 200 || res["status"] != "done" {
-		t.Errorf("alice by hash after her upload: %d %v", code, res)
+	// ask is pure: a model nobody submitted is Nothing, and no job appears
+	if _, ans := A.ask(0, [2]string{s00, "qwen"}); ans[0] != nil || jobs("qwen", s00) != "0" {
+		t.Errorf("ask must not create work: %v, %s jobs", ans, jobs("qwen", s00))
+	}
+	// bad questions are errors, not Nothing
+	if code, _ := A.ask(0, [2]string{s00, "no-such-model"}); code != 400 {
+		t.Errorf("ask with an unknown model: %d, want 400", code)
 	}
 
-	// bob, by hash, for the same picture: need_image -- exactly what a miss
-	// looks like, though the answer exists. A hash alone tells him nothing.
-	code, resB, _ := B.call("POST", "/v1/jobs", job(s00, "pixai"))
-	_, resMiss, _ := B.call("POST", "/v1/jobs", job(strings.Repeat("0", 64), "pixai"))
-	delete(resB, "image")
-	delete(resMiss, "image")
-	if code != 404 || !reflect.DeepEqual(resB, resMiss) {
-		t.Errorf("bob by hash for alice's picture: %d %v -- must equal a genuine miss %v", code, resB, resMiss)
-	}
-	if code, _, _ := B.call("GET", "/v1/jobs/pixai/"+s00, nil); code != 404 {
-		t.Errorf("bob reading alice's job: %d, want 404", code)
+	// bob, for alice's picture: Nothing, as for one nobody has -- a hash
+	// alone tells him nothing
+	if _, ans := B.ask(0, [2]string{s00, "pixai"}, [2]string{strings.Repeat("0", 64), "pixai"}); ans[0] != nil || ans[1] != nil {
+		t.Errorf("bob's ask about alice's picture: %v, want [null null]", ans)
 	}
 	// bob sends the bytes: answered at once, from the one existing record
-	if code, res := B.upload(s00, p00, "pixai"); code != 200 || res["jobs"].([]any)[0].(map[string]any)["status"] != "done" {
-		t.Errorf("bob with the bytes: %d %v, want 200 done at once", code, res)
+	if code := B.submit(s00, p00, "pixai"); code != 202 {
+		t.Errorf("bob's submit: %d", code)
+	}
+	if _, ans := B.ask(0, [2]string{s00, "pixai"}); ans[0] == nil || ans[0]["success"] != true {
+		t.Errorf("bob after sending the bytes: %v, want the answer at once", ans)
 	}
 	if n := query(t, f.db, "SELECT COUNT(*) FROM records WHERE model = 'pixai'")[0][0]; n != "1" {
 		t.Errorf("%s pixai records, want 1 (asked once)", n)
 	}
 
-	// uploads are verified
-	if code, _ := A.upload(strings.Repeat("1", 64), p00, "pixai"); code != 400 {
+	// submits are checked
+	if code := A.submit(strings.Repeat("1", 64), p00, "pixai"); code != 400 {
 		t.Errorf("bytes that don't match the hash: %d, want 400", code)
 	}
-	if code, _ := A.upload(shaOf([]byte("not a picture")), []byte("not a picture"), "pixai"); code != 400 {
+	if code := A.submit(shaOf([]byte("not a picture")), []byte("not a picture"), "pixai"); code != 400 {
 		t.Errorf("not a picture: %d, want 400", code)
 	}
+	if code := A.submit(s00, p00, "no-such-model"); code != 400 {
+		t.Errorf("submit for an unknown model: %d, want 400", code)
+	}
 
-	// an upload is deleted once no job needs it -- its stand-in too -- and
-	// its answers stay. A picture from `imgrec run` is never deleted.
+	// a failure is an answer: joycaption's stub fails some pictures for
+	// good, and those come back Just {success: false}, not Nothing for ever
+	var qs [][2]string
+	for i := range 12 {
+		data, sha := read(fmt.Sprintf("p%02d.png", i))
+		if code := A.submit(sha, data, "joycaption"); code != 202 {
+			t.Fatalf("submit p%02d: %d", i, code)
+		}
+		qs = append(qs, [2]string{sha, "joycaption"})
+	}
+	_, ans := A.ask(30, qs...)
+	failures := 0
+	for i, x := range ans {
+		if x == nil {
+			t.Errorf("joycaption p%02d: still Nothing after the wait", i)
+		} else if x["success"] == false {
+			failures++
+		}
+	}
+	if failures == 0 {
+		t.Error("no failure came back as an answer (the stub fails 1 in 4)")
+	}
+
+	// uploads are deleted once no job needs them, stand-ins too; the
+	// answers stay; a picture from `imgrec run` is never deleted
 	large, sLarge := read("large.png")
-	if code, _ := A.upload(sLarge, large, "deepseek-ocr"); code != 202 {
-		t.Fatalf("large upload: %d", code)
+	A.submit(sLarge, large, "deepseek-ocr")
+	if _, ans := A.ask(20, [2]string{sLarge, "deepseek-ocr"}); ans[0] == nil {
+		t.Fatal("large: no answer")
 	}
-	if code, _, _ := A.call("GET", "/v1/jobs/deepseek-ocr/"+sLarge+"?wait=20", nil); code != 200 {
-		t.Fatalf("large answer: %d", code)
-	}
-	standins, _ := filepath.Glob(filepath.Join(p.Images.Root, "standins", sLarge+"-*"))
-	if len(standins) != 1 {
+	if standins, _ := filepath.Glob(filepath.Join(p.Images.Root, "standins", sLarge+"-*")); len(standins) != 1 {
 		t.Fatalf("stand-in for the large picture: %v", standins)
 	}
-	batch, err := p.Images.PutFile(filepath.Join(dir, "pics", "p05.png")) // as `imgrec run` stores it
+	// a picture nobody submitted, stored as `imgrec run` stores it
+	var fresh bytes.Buffer
+	im := image.NewRGBA(image.Rect(0, 0, 7, 5))
+	im.Pix[0] = 201
+	png.Encode(&fresh, im)
+	freshPath := filepath.Join(dir, "batch-only.png")
+	os.WriteFile(freshPath, fresh.Bytes(), 0o644)
+	batch, err := p.Images.PutFile(freshPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n, err := p.Sweep(0); err != nil || n != 2 {
-		t.Errorf("sweep: %d %v, want the 2 uploads", n, err)
+	if _, err := p.Sweep(0); err != nil {
+		t.Fatal(err)
 	}
 	if onDisk(s00) || onDisk(sLarge) {
 		t.Error("an upload no job needs is still on disk")
@@ -199,35 +250,23 @@ func TestServe(t *testing.T) {
 	if !onDisk(batch.SHA256) {
 		t.Error("a picture from `imgrec run` was swept")
 	}
-	if code, _, _ := A.call("POST", "/v1/jobs", job(sLarge, "deepseek-ocr")); code != 200 {
-		t.Errorf("the answer outlives the picture: %d", code)
-	}
-	// a model that hasn't answered it yet needs the bytes again
-	if code, res, _ := A.call("POST", "/v1/jobs", job(sLarge, "joycaption")); code != 404 || res["need_image"] != true {
-		t.Errorf("a new model after the sweep: %d %v, want need_image", code, res)
+	if _, ans := A.ask(0, [2]string{sLarge, "deepseek-ocr"}, [2]string{sLarge, "toriigate"}); ans[0] == nil || ans[1] != nil {
+		t.Errorf("after the sweep: %v, want [the answer, null]", ans)
 	}
 
-	// the guard reads gemma's description: asking for it queues gemma too
+	// the guard reads gemma's description: submitting it queues gemma too
 	p01, s01 := read("p01.png")
-	if code, _ := A.upload(s01, p01, "llamaguard"); code != 202 {
-		t.Fatalf("guard upload: %d", code)
-	}
-	if code, res, _ := A.call("GET", "/v1/jobs/llamaguard/"+s01+"?wait=30", nil); code != 200 || res["status"] != "done" {
-		t.Fatalf("guard answer: %d %v", code, res)
-	}
-	if code, _, _ := A.call("GET", "/v1/jobs/gemma/"+s01, nil); code != 200 {
-		t.Errorf("the guard's dependency gemma: %d, want done", code)
+	A.submit(s01, p01, "llamaguard")
+	if _, ans := A.ask(30, [2]string{s01, "llamaguard"}, [2]string{s01, "gemma"}); ans[0] == nil || ans[1] == nil {
+		t.Fatalf("guard and its describer: %v", ans)
 	}
 
-	// cancel, queue, admin
-	if code, _, _ := A.call("DELETE", "/v1/jobs/qwen/"+s01, nil); code != 204 {
-		t.Errorf("cancel: %d", code)
-	}
+	// queue, admin
 	if code, q, _ := A.call("GET", "/v1/queue", nil); code != 200 || q["client"] != "alice" || q["admin"] != false {
 		t.Errorf("queue: %d %v", code, q)
 	}
-	if code, res, _ := R.call("GET", "/v1/jobs/gemma/"+s01, nil); code != 200 || res["status"] != "done" {
-		t.Errorf("admin reading alice's answer: %d", code)
+	if _, ans := R.ask(0, [2]string{s01, "gemma"}); ans[0] == nil {
+		t.Error("admin can't read alice's answer")
 	}
 
 	// the client tool: two models over three pictures, then again --
@@ -253,10 +292,10 @@ func TestServe(t *testing.T) {
 		msgs, _ := os.ReadFile(filepath.Join(dir, "submit.err"))
 		return string(msgs)
 	}
-	if msgs := submit(); !strings.Contains(msgs, "3 picture(s) had to be sent") {
+	if msgs := submit(); !strings.Contains(msgs, "3 picture(s) sent") {
 		t.Errorf("first submit: %s", msgs)
 	}
-	if msgs := submit(); !strings.Contains(msgs, "0 picture(s) had to be sent") {
+	if msgs := submit(); !strings.Contains(msgs, "0 picture(s) sent") {
 		t.Errorf("second submit should send nothing: %s", msgs)
 	}
 }

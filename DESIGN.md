@@ -127,37 +127,39 @@ That's today's fixed `PHASES`, made dynamic.
 
 ## HTTP API
 
-All calls carry `Authorization: Bearer <token>`. Every call is
-idempotent: asking twice is asking once. **Pictures travel only when
-needed**: a job is asked for by hash first.
+Two calls (the user's design), and everything else follows from their
+types:
 
-- `GET /v1/models` -- name, kind, output schema, spec hash
-- `POST /v1/jobs {image: sha, model}` -- 200 + the answer (cached), 202 +
-  `Location` (queued: the server has the picture), or **404
-  `need_image`** (send it). Not 204: that means "success, nothing to
-  read", and a client that only checks 2xx would record the job as done
-- `POST /v1/jobs` multipart -- `image` (sha), `models` (one or more),
-  `file`: the picture, verified against the hash; one upload serves every
-  model named. 202 if any is queued, else 200; the body lists each job
-- `GET /v1/jobs/{model}/{sha}?wait=N` -- 200 + result, 202 still pending
-  (after holding up to N s), or the failure
-- `DELETE /v1/jobs/{model}/{sha}` -- withdraw your interest
-- `GET /v1/queue` -- per model: state, in flight, your pending jobs
+    ask    :: [(ImageHash, Model)] -> [Maybe Answer]     POST /v1/ask[?wait=N]
+    submit :: Image -> [Model] -> WorkingOnIt            POST /v1/submit (multipart)
+
+- **ask** is a pure query: it never creates work. `Nothing` means no
+  answer *for you* yet -- not asked, still running, or a picture you have
+  never sent: the same `Nothing` every time, so a hash alone reveals
+  nothing. An `Answer` is what the model said, or, once a job ran out of
+  attempts, why it couldn't (`success: false`): a broken picture is
+  answered, not pending for ever. `?wait=N` holds until every answer is
+  `Just` or N seconds pass. Questions come in bundles (up to 1024).
+- **submit** is the only call that creates work: the picture (verified
+  against its hash) and the models to run it on; one upload covers them
+  all. 202, and nothing more.
+- also `GET /v1/models` (what can be asked), `GET /v1/queue` (what's
+  running). No cancel: it isn't in the algebra.
 
 The cache key is computed from the picture's hash alone (the downscaling
 a model gets is declared in its spec: `input.max_pixels`, `input.resize`),
-which is what lets a hit need no picture.
+which is what lets ask answer without the picture.
 
 **Uploaded pictures are deleted once no job needs them** (done or failed
 for good; `Sweep`, every 10 s, with a 1-minute grace so a fresh upload
 lives until its jobs are queued). Their stand-ins go too; the answers
 stay. Pictures from `imgrec run DIR` are never deleted.
 
-**The client needs no queue**: its pending set is its own input list.
-`imgrec submit`: ask every (picture, model) by hash, send each picture
-once for whichever models said `need_image`, then GET the 202s with
-`?wait=60` until they are 200. Re-run with the same inputs and nothing
-is sent twice.
+**The client** (`imgrec submit`): ask everything; submit each picture
+whose answers came back `Nothing`, once, for exactly those models; ask
+again, waiting, until every answer is `Just`. A client that crashes and
+re-runs re-sends pictures still in progress (it can't tell "running" from
+"never sent" -- the price of `Maybe`); harmless, the jobs already exist.
 
 ## Clients (tenancy) and auth
 
@@ -165,9 +167,9 @@ is sent twice.
   NAME [--admin]` prints a token once; the db keeps only its hash
 - answers are shared (an image two clients submitted runs once), but a
   client gets one **by hash only for a picture it has itself sent at least
-  once** (`client_images`, which outlives the picture). Otherwise it is
-  `need_image`, byte for byte what a genuine miss looks like, so a hash
-  alone reveals nothing about anyone else's pictures. Once it sends the
+  once** (`client_images`, which outlives the picture). Otherwise ask
+  says `Nothing`, exactly as for a picture nobody has, so a hash alone
+  reveals nothing about anyone else's pictures. Once it sends the
   bytes, a cached answer comes back at once, without re-running. (A
   client holding the bytes can tell from that instant answer that someone
   ran them: the price of sharing answers at all.)
