@@ -9,9 +9,12 @@ program, `imgrec`. Python stays only inside the model runtimes.
 long-lived: started once, used for many images, stopped to free the card.
 
 - `vllm serve <weights>`: one per chat model, OpenAI HTTP on 127.0.0.1.
-- the pixai runner: `pixai_tag.py` in worker mode (a small change: read
-  image paths from stdin, write one JSON line per image to stdout, stay
-  up). Loads torch and the model once.
+- the pixai worker (`runners/pixai_worker.py`): loads torch and the
+  model once, then reads image paths from stdin and writes one JSON line
+  per image to stdout, batching whatever is waiting. Not faster per image
+  on a big batch (the forward pass owns the GPU either way), but a
+  single image no longer pays ~10-20 s of python, torch, CUDA and model
+  load before it is tagged.
 
 **imgrec** is the service. It never imports torch or CUDA. It owns:
 starting and stopping runners (that *is* model loading; the scheduler
@@ -157,13 +160,11 @@ Each machine runs `imgrec` with the jsonl backend over a disjoint share
 of the work (image sha mod N); results merge by import. Leases only if
 duplicated work ever matters -- it is wasteful, never wrong.
 
-## Migrating the answers already paid for
+## No cache migration
 
-Old cache rows were asked with inherited parameters. Where the explicit
-spec equals what was effectively used (same request, the inherited
-generation_config defaults now spelled out), adopt the old row under the
-new key instead of re-running. Rows asked without a seed are samples, so
-adoption records that.
+The python pipeline's caches are not imported: imgrec starts with an
+empty cache (the user's call). `imgrec import-py-cache` exists only as
+the parity test's tool.
 
 ## Testing
 

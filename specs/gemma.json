@@ -1,0 +1,337 @@
+{
+  "name": "gemma",
+  "input": {
+    "max_pixels": 2500000
+  },
+  "kind": "fields",
+  "server": {
+    "max_model_len": 8192,
+    "generation_config": "vllm",
+    "limit_mm_per_prompt": {
+      "image": 1,
+      "video": 0
+    }
+  },
+  "runner": {
+    "type": "vllm",
+    "gpu": 0.95,
+    "max_num_seqs": 8
+  },
+  "request": {
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "{image}"
+            }
+          },
+          {
+            "type": "text",
+            "text": "Analyze this image and fill in every JSON field. description: two to four sentences describing the image. text: a verbatim transcription of all readable text in reading order, or null if there is none. tags: 10-30 danbooru-style tags (lowercase_with_underscores). emotion: the emotions conveyed -- overall for the image as a whole, plus one entry per depicted subject. subjects: one entry per depicted character or person; name is their proper name when you can identify them, otherwise a short descriptor like 'blonde witch girl'; probability is your 0-1 confidence that the identification is correct (low when guessing). rating: the content rating on the danbooru scale: safe, sensitive, questionable, or explicit. dimensionality: 2d for drawn, painted, anime or illustrated images, 3d for photographs and 3d renders. confidence: your own 0-1 confidence in each of the other fields -- be honest and use the low end when you are unsure, this is recorded next to the value."
+          }
+        ]
+      }
+    ],
+    "temperature": 0.2,
+    "top_p": 0.95,
+    "top_k": 64,
+    "max_tokens": 2048,
+    "response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "image_recognition",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "description": {
+              "type": "string"
+            },
+            "text": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "emotion": {
+              "type": "object",
+              "properties": {
+                "overall": {
+                  "type": "string"
+                },
+                "subjects": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "subject": {
+                        "type": "string"
+                      },
+                      "emotion": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "subject",
+                      "emotion"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "overall",
+                "subjects"
+              ],
+              "additionalProperties": false
+            },
+            "subjects": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "probability": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                },
+                "required": [
+                  "name",
+                  "probability"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "rating": {
+              "type": "string",
+              "enum": [
+                "safe",
+                "sensitive",
+                "questionable",
+                "explicit"
+              ]
+            },
+            "dimensionality": {
+              "type": "string",
+              "enum": [
+                "2d",
+                "3d"
+              ]
+            },
+            "confidence": {
+              "type": "object",
+              "properties": {
+                "description": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "text": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "tags": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "emotion": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "rating": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "dimensionality": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              },
+              "required": [
+                "description",
+                "text",
+                "tags",
+                "emotion",
+                "rating",
+                "dimensionality"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "description",
+            "text",
+            "tags",
+            "emotion",
+            "subjects",
+            "rating",
+            "dimensionality",
+            "confidence"
+          ],
+          "additionalProperties": false
+        }
+      }
+    }
+  },
+  "output": {
+    "type": "object",
+    "properties": {
+      "description": {
+        "type": "string"
+      },
+      "text": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "tags": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "emotion": {
+        "type": "object",
+        "properties": {
+          "overall": {
+            "type": "string"
+          },
+          "subjects": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "subject": {
+                  "type": "string"
+                },
+                "emotion": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "subject",
+                "emotion"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "overall",
+          "subjects"
+        ],
+        "additionalProperties": false
+      },
+      "subjects": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "probability": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "required": [
+            "name",
+            "probability"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "rating": {
+        "type": "string",
+        "enum": [
+          "safe",
+          "sensitive",
+          "questionable",
+          "explicit"
+        ]
+      },
+      "dimensionality": {
+        "type": "string",
+        "enum": [
+          "2d",
+          "3d"
+        ]
+      },
+      "confidence": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "text": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "tags": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "emotion": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "rating": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "dimensionality": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "required": [
+          "description",
+          "text",
+          "tags",
+          "emotion",
+          "rating",
+          "dimensionality"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "required": [
+      "description",
+      "text",
+      "tags",
+      "emotion",
+      "subjects",
+      "rating",
+      "dimensionality",
+      "confidence"
+    ],
+    "additionalProperties": false
+  }
+}

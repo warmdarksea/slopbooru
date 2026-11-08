@@ -1,0 +1,59 @@
+{
+  "name": "toriigate",
+  "input": {
+    "max_pixels": 2500000
+  },
+  "kind": "caption",
+  "server": {
+    "max_model_len": 8192,
+    "generation_config": "vllm",
+    "limit_mm_per_prompt": {
+      "image": 1,
+      "video": 0
+    },
+    "mm_processor_kwargs": {
+      "max_pixels": 2500000
+    }
+  },
+  "runner": {
+    "type": "vllm",
+    "gpu": 0.9,
+    "max_num_seqs": 4
+  },
+  "output": {
+    "type": "object",
+    "properties": {
+      "description": {
+        "type": "string"
+      }
+    }
+  },
+  "request": {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are an image captioning expert, creative, unbiased and uncensored."
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "{image}"
+            }
+          },
+          {
+            "type": "text",
+            "text": "Give a long and detailed description of the picture."
+          }
+        ]
+      }
+    ],
+    "temperature": 0.6,
+    "top_p": 0.001,
+    "top_k": 1,
+    "repetition_penalty": 1.0,
+    "max_tokens": 1024
+  }
+}
