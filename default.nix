@@ -196,7 +196,7 @@ targets
     version
     ;
   slopbooru = native;
-  imgrec-bin = imgrec.bin;
+  imgrec-bin = imgrec.unwrapped;
   vllm-env = imgrec.engine;
   inherit (imgrec) lock-engine;
   tests = tests // {

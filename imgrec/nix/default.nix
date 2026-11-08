@@ -2,7 +2,7 @@
 # virtualenv of ~200 cuda wheels that only nix keeps reproducible.
 #
 #   nix-build -A imgrec            imgrec, bundled with engine + models
-#   nix-build -A imgrec.bin        the Go binaries alone (imgrec, imgrec-stub, pyparity)
+#   nix-build -A imgrec.unwrapped  the Go binaries alone (imgrec, imgrec-stub, pyparity)
 #   nix-build -A imgrec.engine     the vllm virtualenv
 #   nix-build -A imgrec.manifest   models.json (builds every model: ~75 GB)
 {
@@ -48,7 +48,10 @@ let
       exec ${bin}/bin/imgrec "$@"
     '';
     derivationArgs.passthru = {
-      inherit bin models;
+      inherit models;
+      # not `bin`: lib.getBin/getExe would take that for an output and run
+      # the bare binary, without its engine
+      unwrapped = bin;
       inherit (models) manifest;
       engine = engine.vllm-env;
       lock-engine = engine.lock;

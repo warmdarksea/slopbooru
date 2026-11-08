@@ -63,7 +63,7 @@ after touching `imgrec/nix` or the pins.
 `nix-build -A tests.all` (unit, static, linux and windows-under-wine
 slopcheck). slopcheck crawls ~600 pages of each fixture db: every page must
 render whole with its sidebar. imgrec's Go tests also run inside
-`nix-build -A imgrec.bin`.
+`nix-build -A imgrec.unwrapped`.
 
 On the real card: `imgrec run` / `imgrec serve` with the bundled
 `nix-build -A imgrec`; it must have the whole GPU (stop other LLM servers).
