@@ -225,6 +225,28 @@ func (s *Store) Write(im Image, prov Provenance, kind string, c model.Contributi
 			return 0, err
 		}
 	}
+	// a contribution is the whole current answer to its question for this
+	// image: it replaces the previous answer's rows rather than merging
+	// with them (a guard re-asked with new context said "safe" where it had
+	// said "unsafe" -- merged, both would stand). "Its question" is the
+	// model, mode and params, across engine builds and closures: the
+	// engine isn't part of the question (nor of the cache key), so an
+	// answer from a rebuilt engine supersedes the old one too.
+	same := "SELECT id FROM provenances WHERE model = ? AND mode = ? AND params = ?"
+	params := pyjson.Dumps(prov.Params, 0, true)
+	if prov.Params == nil {
+		params = "{}"
+	}
+	if _, err := tx.Exec("DELETE FROM annotations WHERE image_id = ? AND provenance_id IN ("+same+")",
+		iid, prov.Model, prov.Mode, params); err != nil {
+		return 0, err
+	}
+	if c.Success && c.Error == "" {
+		if _, err := tx.Exec("DELETE FROM failures WHERE image_id = ? AND provenance_id IN ("+same+")",
+			iid, prov.Model, prov.Mode, params); err != nil {
+			return 0, err
+		}
+	}
 	rows := RowsFor(c.Fields, c.Detail, kind)
 	for _, r := range rows {
 		var det any

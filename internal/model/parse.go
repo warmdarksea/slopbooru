@@ -178,11 +178,20 @@ func steps(logprobs any) []any {
 	return s
 }
 
-// GuardProbability: {"safe": p, "unsafe": p} from the first token that
-// carries the verdict, or nil -- never zeros -- when none does.
+// GuardProbability: {"safe": p, "unsafe": p} at the token where the
+// verdict was decided -- the first step whose *chosen* token begins
+// "safe" or "unsafe" ("un" counts) -- or nil, never zeros, when no chosen
+// token does. Not "the first step where any candidate looks like a
+// verdict": llama-guard opens with a newline chosen at p=1, and that
+// step's tail of candidates holds an "s" or "S" at 1e-20, which would
+// read as a confidence of 0.00 (seen on the real card).
 func GuardProbability(logprobs any) map[string]float64 {
 	for _, st := range steps(logprobs) {
 		step, _ := st.(map[string]any)
+		chosen, _ := step["token"].(string)
+		if guardBucket(chosen) == "" {
+			continue
+		}
 		p := map[string]float64{"safe": 0, "unsafe": 0}
 		cands, _ := step["top_logprobs"].([]any)
 		for _, c := range cands {
@@ -205,6 +214,7 @@ func GuardProbability(logprobs any) map[string]float64 {
 		if p["safe"] != 0 || p["unsafe"] != 0 {
 			return p
 		}
+		return nil
 	}
 	return nil
 }

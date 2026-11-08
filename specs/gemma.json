@@ -11,6 +11,10 @@
     "limit_mm_per_prompt": {
       "image": 1,
       "video": 0
+    },
+    "structured_outputs_config": {
+      "backend": "xgrammar",
+      "disable_any_whitespace": true
     }
   },
   "runner": {

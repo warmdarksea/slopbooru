@@ -14,6 +14,10 @@
     },
     "mm_processor_kwargs": {
       "max_pixels": 2500000
+    },
+    "structured_outputs_config": {
+      "backend": "xgrammar",
+      "disable_any_whitespace": true
     }
   },
   "runner": {
