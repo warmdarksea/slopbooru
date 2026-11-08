@@ -76,10 +76,10 @@ let
     };
 
   # the rest of the config, for services.gpu-timeshare.settings (or the
-  # toml below): the big models take the card an hour at a time when more
-  # than one has work, and vllm may take a while to load one
+  # toml below): the models on the card give way after an hour when others
+  # wait, and vllm may take a while to load one
   settings = {
-    scheduler = { rotation = "1h"; start_timeout = "20m"; };
+    scheduler = { max_timeslice = "1h"; start_timeout = "20m"; };
   };
 
   models = {
