@@ -115,9 +115,16 @@ func (s *Scheduler) round(ctx context.Context) (bool, error) {
 	var models []Model
 	busy := waiting > 0
 	for name, sl := range s.slots {
-		if sl.state == Up && !sl.runner.Alive() {
-			s.logf("%s: runner died", name)
-			sl.state = Down
+		if (sl.state == Up || sl.state == Draining) && !sl.runner.Alive() {
+			// a runner that starts and then dies at work is as broken as
+			// one that won't start: restarting it only burns attempts
+			sl.state, sl.runner = Down, nil
+			sl.startFails++
+			s.logf("%s: runner died (%d)", name, sl.startFails)
+			if sl.startFails >= 2 {
+				sl.broken = true
+				s.logf("%s: giving up on it; see its log", name)
+			}
 		}
 		ready := 0
 		for _, j := range pending[name] {
