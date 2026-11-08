@@ -17,6 +17,7 @@ type Scheduler struct {
 	P         *pipeline.Pipeline
 	NewRunner func(*spec.Spec) (runner.Runner, error)
 	Rotation  time.Duration // a busy model gives way after this, if others wait
+	Idle      time.Duration // a loaded model with no work for this long stops (0: never)
 	Budget    float64       // share of the card to fill (1.0)
 	Grace     time.Duration // between SIGTERM and SIGKILL on stop
 	Tick      time.Duration
@@ -33,6 +34,7 @@ type slot struct {
 	runner     runner.Runner
 	state      State
 	upSince    time.Time
+	busyAt     time.Time // the last round it had work
 	inflight   int
 	startFails int
 	broken     bool
@@ -137,19 +139,25 @@ func (s *Scheduler) round(ctx context.Context) (bool, error) {
 		}
 		if ready > 0 || sl.inflight > 0 || sl.state == Starting {
 			busy = true
+			sl.busyAt = time.Now()
 		}
 		models = append(models, Model{Name: name, GPU: gpuOf(sl.spec), State: sl.state,
-			UpSince: sl.upSince, Inflight: sl.inflight, Ready: ready})
+			UpSince: sl.upSince, Inflight: sl.inflight, Ready: ready, BusyAt: sl.busyAt})
 	}
 	sort.Slice(models, func(i, j int) bool { return models[i].Name < models[j].Name })
 
-	for _, a := range Decide(models, time.Now(), s.Rotation, s.Budget) {
+	pol := Policy{Rotation: s.Rotation, Idle: s.Idle, Budget: s.Budget}
+	for _, a := range Decide(models, time.Now(), pol) {
 		sl := s.slots[a.Model]
 		switch a.Kind {
 		case Start:
 			s.start(ctx, a.Model, sl)
 		case Stop:
-			s.logf("%s: stopping", a.Model)
+			if sl.state == Up && s.Idle > 0 && time.Since(sl.busyAt) >= s.Idle {
+				s.logf("%s: idle for %s: stopping", a.Model, time.Since(sl.busyAt).Round(time.Second))
+			} else {
+				s.logf("%s: stopping", a.Model)
+			}
 			r := sl.runner
 			sl.state, sl.runner = Down, nil
 			go r.Stop(s.Grace)
@@ -191,7 +199,7 @@ func (s *Scheduler) start(ctx context.Context, name string, sl *slot) {
 			}
 			return
 		}
-		sl.state, sl.upSince = Up, time.Now()
+		sl.state, sl.upSince, sl.busyAt = Up, time.Now(), time.Now()
 		s.logf("%s: up after %s", name, time.Since(t).Round(time.Millisecond))
 	}()
 }

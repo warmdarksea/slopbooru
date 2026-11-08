@@ -27,8 +27,16 @@ type Model struct {
 	GPU      float64 // share of the card its runner takes
 	State    State
 	UpSince  time.Time
-	Inflight int // requests being answered
-	Ready    int // jobs that could be sent now
+	Inflight int       // requests being answered
+	Ready    int       // jobs that could be sent now
+	BusyAt   time.Time // the last time it had work (ready or in flight)
+}
+
+// Policy is Decide's knobs.
+type Policy struct {
+	Rotation time.Duration // a busy model gives way after this, if others wait
+	Idle     time.Duration // an up model with no work for this long stops (0: never)
+	Budget   float64       // share of the card to fill
 }
 
 type ActionKind int
@@ -50,7 +58,9 @@ const eps = 1e-9
 
 // Decide is one round of the policy:
 //
-//  1. a draining model with nothing in flight stops;
+//  1. a draining model with nothing in flight stops, and so does an up
+//     model that has had no work for the idle period -- so an empty queue
+//     leaves the card with no process on it, free to power down;
 //  2. one start at a time (vllm sizes its KV cache from memory measured
 //     while starting; a neighbour starting concurrently makes it lie);
 //  3. models already up are drained first (by the driver); when a model
@@ -59,10 +69,17 @@ const eps = 1e-9
 //  5. if that isn't enough, rotate: a busy model up longer than the
 //     rotation period drains, so a steady stream for one model can't
 //     starve the rest. It finishes what's in flight, then stops.
-func Decide(models []Model, now time.Time, rotation time.Duration, budget float64) []Action {
+func Decide(models []Model, now time.Time, pol Policy) []Action {
+	rotation, budget := pol.Rotation, pol.Budget
+	models = append([]Model(nil), models...) // the idle rule marks its stops Down
 	var out []Action
 	used, starting, draining := 0.0, false, false
-	for _, m := range models {
+	for i, m := range models {
+		if m.State == Up && m.Ready == 0 && m.Inflight == 0 && pol.Idle > 0 && now.Sub(m.BusyAt) >= pol.Idle {
+			out = append(out, Action{Stop, m.Name})
+			models[i].State = Down // gone, for the rest of the round
+			continue
+		}
 		switch m.State {
 		case Draining:
 			if m.Inflight == 0 {

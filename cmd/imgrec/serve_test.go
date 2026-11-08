@@ -21,6 +21,7 @@ import (
 
 	"imgrec/internal/api"
 	"imgrec/internal/auth"
+	"imgrec/internal/sched"
 )
 
 type apiClient struct {
@@ -322,5 +323,62 @@ func TestClientThenServe(t *testing.T) {
 	}
 	if _, err := p.Intake("pixai", im.SHA256, "alice"); err != nil {
 		t.Fatalf("intake on a db made by `client`: %v", err)
+	}
+}
+
+// An empty queue leaves no runner up: once a model has had no work for
+// --idle it is stopped (the card can power down), and the next job starts
+// it again.
+func TestIdleUnloads(t *testing.T) {
+	dir := t.TempDir()
+	pictures(t, filepath.Join(dir, "pics"))
+	t.Setenv("IMGREC_STUB_LOG", filepath.Join(dir, "stub.log"))
+	f := fleet{db: filepath.Join(dir, "results.db"), specsDir: "../../specs", manifest: manifestFile(t, dir),
+		vllm: stub, pixai: stub + " pixai-worker", logs: filepath.Join(dir, "logs"),
+		rotation: 2 * time.Hour, idle: 500 * time.Millisecond, maxAttempts: 3}
+	p, sc, closeAll, err := f.open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeAll()
+	sc.Logf = t.Logf
+	a, _ := auth.Open(p.Store.DB)
+	alice, _ := a.Add("alice", false)
+	ts := httptest.NewServer(&api.Server{P: p, Auth: a, Sched: sc, MaxUpload: 64 << 20, MaxWait: 30 * time.Second})
+	defer ts.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	schedDone := make(chan error, 1)
+	go func() { schedDone <- sc.Run(ctx, false) }()
+	defer func() { cancel(); <-schedDone }()
+
+	A := apiClient{t, ts.URL, alice}
+	upNow := func() []string {
+		var up []string
+		for _, m := range sc.Snapshot() {
+			if m.State != sched.Down {
+				up = append(up, m.Name)
+			}
+		}
+		return up
+	}
+	waitAllDown := func() {
+		t.Helper()
+		for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+			if len(upNow()) == 0 {
+				return
+			}
+		}
+		t.Fatalf("still loaded with nothing to do: %v", upNow())
+	}
+	for _, name := range []string{"p00.png", "p01.png"} {
+		data, _ := os.ReadFile(filepath.Join(dir, "pics", name))
+		sha := shaOf(data)
+		if code := A.submit(sha, data, "pixai", "gemma"); code != 202 {
+			t.Fatalf("submit %s: %d", name, code)
+		}
+		if _, ans := A.ask(20, [2]string{sha, "pixai"}, [2]string{sha, "gemma"}); ans[0] == nil || ans[1] == nil {
+			t.Fatalf("%s: %v", name, ans)
+		}
+		waitAllDown() // and the second picture brings them back
 	}
 }

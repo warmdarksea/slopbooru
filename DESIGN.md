@@ -121,7 +121,13 @@ The constraint is VRAM, not job count, and loading costs 1-2 minutes.
   fit beside it, even if its own queue is still being refilled -- so a
   steady stream for the big model can't starve everything else. It
   finishes the requests in flight, stops, and its leftover jobs wait
-  their turn like any others.
+  their turn like any others;
+- **unload when idle** (the user's call): a runner with no work for
+  `--idle` (default 10 min, `IMGREC_IDLE`, 0 = never) stops, so an empty
+  queue leaves no process on the card and it can drop to its idle power
+  state. Measured on the 3090: 9 MiB and P8 at ~36 W afterwards, the same
+  as before anything started; the price is the 1-2 minute start when the
+  next job arrives.
 
 That's today's fixed `PHASES`, made dynamic.
 

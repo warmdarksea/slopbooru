@@ -33,7 +33,7 @@ import (
 type fleet struct {
 	db, recordsDir, writer, imagesDir, specsDir, manifest, vllm, pixai, logs string
 	models                                                                   string
-	rotation                                                                 time.Duration
+	rotation, idle                                                           time.Duration
 	maxAttempts                                                              int
 }
 
@@ -60,6 +60,8 @@ func (f *fleet) flags(fs *flag.FlagSet) {
 	fs.StringVar(&f.models, "models", env("MODELS", ""), "comma-separated models (default: every spec)")
 	rot, _ := time.ParseDuration(env("ROTATION", "2h"))
 	fs.DurationVar(&f.rotation, "rotation", rot, "a busy model gives way after this when others wait")
+	idle, _ := time.ParseDuration(env("IDLE", "10m"))
+	fs.DurationVar(&f.idle, "idle", idle, "a loaded model with no work for this long is stopped, freeing the card (0: never)")
 	fs.IntVar(&f.maxAttempts, "max-attempts", 3, "tries per job before it counts as failed")
 }
 
@@ -193,7 +195,7 @@ func (f *fleet) open() (*pipeline.Pipeline, *sched.Scheduler, func(), error) {
 		return &runner.VLLM{Argv: argv, Port: port, Log: logf, Timeout: 10 * time.Minute,
 			Env: []string{"VLLM_NO_USAGE_STATS=1", "DO_NOT_TRACK=1", "HF_HUB_OFFLINE=1", "TRANSFORMERS_OFFLINE=1"}}, nil
 	}
-	sc := &sched.Scheduler{P: p, NewRunner: newRunner, Rotation: f.rotation, Budget: 1.0,
+	sc := &sched.Scheduler{P: p, NewRunner: newRunner, Rotation: f.rotation, Idle: f.idle, Budget: 1.0,
 		Logf: func(format string, a ...any) { fmt.Fprintf(os.Stderr, "imgrec: "+format+"\n", a...) }}
 	closeAll := func() { rec.Close(); st.Close() }
 	return p, sc, closeAll, nil
