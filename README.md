@@ -74,6 +74,29 @@ Editing is off by default. With `--edit`, anyone who can reach the
 address and port can edit, so keep `--host 127.0.0.1` unless you trust
 the network. The db file must be writable.
 
+## The backend: imgrec
+
+imgrec fills the db: it runs every picture through seven vision models
+(vllm servers plus the pixai tagger) on one GPU, caching every answer by
+the full question, and serves an HTTP API in front of them with a
+token per client. It is built with nix only -- its engine is a virtualenv
+of ~200 cuda wheels, patched at build time, that only nix keeps
+reproducible:
+
+```
+nix-build -A imgrec                   # bundled with its engine and models (~75 GB of weights)
+imgrec run --db pics/results.db pics  # batch: every picture on every model
+imgrec serve --db imgrec.db --listen 0.0.0.0:8100 \
+  --tls-cert imgrec.crt --tls-key imgrec.key
+imgrec cert --hosts library,10.0.0.2  # a self-signed certificate for the above
+imgrec client --db imgrec.db add alice   # prints alice's token, once
+imgrec submit --server https://library:8100 --cacert imgrec.crt --token T pictures/*
+```
+
+On NixOS, nornpkgs has it as a service (`services.imgrec`). Then point
+the booru at the same db. The design and its decisions are in
+[imgrec/DESIGN.md](imgrec/DESIGN.md).
+
 ## Building
 
 With nix:

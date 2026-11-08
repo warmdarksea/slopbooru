@@ -111,12 +111,22 @@ func submitCmd(args []string) error {
 	token := fs.String("token", env("TOKEN", ""), "your token (or IMGREC_TOKEN)")
 	only := fs.String("models", "", "comma-separated models (default: every model the server has)")
 	wait := fs.Int("wait", 60, "seconds each ask may wait on the server")
+	cacert := fs.String("cacert", env("CACERT", ""), "trust this certificate (PEM) for an https server, e.g. one made by imgrec cert")
 	fs.Parse(args)
 	if *token == "" || fs.NArg() == 0 {
-		return fmt.Errorf("usage: imgrec submit --token T [--server URL] [--models a,b] FILE...")
+		return fmt.Errorf("usage: imgrec submit --token T [--server URL] [--cacert F] [--models a,b] FILE...")
 	}
+	tlsConf, err := clientTLS(*cacert)
+	if err != nil {
+		return err
+	}
+	if cleartextRemote(*server) {
+		fmt.Fprintf(os.Stderr, "imgrec: warning: %s is plain http: the token crosses the network in the clear\n", *server)
+	}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSClientConfig = tlsConf
 	c := &client{base: strings.TrimRight(*server, "/"), token: *token,
-		http: &http.Client{Timeout: time.Duration(*wait+60) * time.Second}}
+		http: &http.Client{Timeout: time.Duration(*wait+60) * time.Second, Transport: tr}}
 
 	var info struct {
 		Models []struct {

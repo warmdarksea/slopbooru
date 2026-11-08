@@ -26,7 +26,12 @@ func serveCmd(args []string) error {
 	listen := fs.String("listen", env("LISTEN", "127.0.0.1:8100"), "address to listen on")
 	maxUpload := fs.Int64("max-upload", 256<<20, "largest picture accepted, in bytes")
 	maxWait := fs.Duration("max-wait", 5*time.Minute, "cap on a request's ?wait=")
+	tlsCert := fs.String("tls-cert", env("TLS_CERT", ""), "serve https with this certificate (PEM; re-read when it changes)")
+	tlsKey := fs.String("tls-key", env("TLS_KEY", ""), "the certificate's private key (PEM)")
 	fs.Parse(args)
+	if (*tlsCert == "") != (*tlsKey == "") {
+		return fmt.Errorf("--tls-cert and --tls-key go together")
+	}
 
 	p, sc, closeAll, err := f.open()
 	if err != nil {
@@ -44,6 +49,19 @@ func serveCmd(args []string) error {
 	srv := &http.Server{
 		Handler:           &api.Server{P: p, Auth: a, Sched: sc, MaxUpload: *maxUpload, MaxWait: *maxWait, Logf: logf},
 		ReadHeaderTimeout: 30 * time.Second,
+	}
+	scheme := "http"
+	if *tlsCert != "" {
+		certs, err := newCertReloader(*tlsCert, *tlsKey, logf)
+		if err != nil {
+			return err
+		}
+		srv.TLSConfig = certs.config()
+		scheme = "https"
+		c, _ := certs.get(nil)
+		logf("tls: %s (%s)", *tlsCert, fingerprint(c.Certificate[0]))
+	} else if cleartextRemote("http://" + *listen) {
+		logf("warning: no --tls-cert, so tokens and pictures cross the network in the clear")
 	}
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
@@ -78,8 +96,12 @@ func serveCmd(args []string) error {
 		defer done()
 		srv.Shutdown(shut)
 	}()
-	logf("listening on http://%s", ln.Addr())
-	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	logf("listening on %s://%s", scheme, ln.Addr())
+	serve := func() error { return srv.Serve(ln) }
+	if srv.TLSConfig != nil {
+		serve = func() error { return srv.ServeTLS(ln, "", "") }
+	}
+	if err := serve(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	logf("stopping: runners are being shut down")

@@ -182,6 +182,19 @@ re-runs re-sends pictures still in progress (it can't tell "running" from
 - admin sees everything and manages clients
 - the queue takes turns between clients
 
+## TLS
+
+A bearer token is a password, so off this machine the API wants TLS.
+`imgrec serve --tls-cert F --tls-key F` (`IMGREC_TLS_CERT`/`_KEY`) serves
+https; the files are re-read whenever they change, so a renewal needs no
+restart, and a half-written pair keeps the loaded one in service. With no
+CA on the network, `imgrec cert --hosts name,ip,...` makes a self-signed
+certificate that is its own CA (ECDSA P-256, ten years, the key 0600,
+never overwritten; `--if-missing` for a service's first start), and a
+client trusts it with `imgrec submit --cacert F` (`IMGREC_CACERT`). Both
+sides warn when a token would cross the network as plain http. The NixOS
+module (nornpkgs) makes that certificate itself unless given one.
+
 ## Several machines
 
 Each machine runs `imgrec` with the jsonl backend over a disjoint share
@@ -209,4 +222,6 @@ the parity test's tool.
 2. jsonl backend -- done
 3. runners + scheduler (batch mode), against stubs -- done
 4. HTTP API, clients, tokens; packaging (flake + make) -- done
-5. the real card: every model through `imgrec run`, then `serve`
+5. the real card: every model through `imgrec run`, then `serve` -- done
+   (2026-11-08)
+6. TLS, idle unloading, the NixOS module -- done
