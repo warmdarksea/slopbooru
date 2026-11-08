@@ -12,10 +12,10 @@ import (
 	"syscall"
 	"time"
 
-	"imgrec/internal/api"
-	"imgrec/internal/auth"
-	"imgrec/internal/pipeline"
-	"imgrec/internal/store"
+	"slopbooru/imgrec/internal/api"
+	"slopbooru/imgrec/internal/auth"
+	"slopbooru/imgrec/internal/pipeline"
+	"slopbooru/imgrec/internal/store"
 )
 
 // imgrec serve: the HTTP API, with the scheduler running behind it.

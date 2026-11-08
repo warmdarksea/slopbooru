@@ -3,7 +3,7 @@ package model
 import (
 	"testing"
 
-	"imgrec/internal/pyjson"
+	"slopbooru/imgrec/internal/pyjson"
 )
 
 func logprobs(t *testing.T, s string) any {

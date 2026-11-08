@@ -1,23 +1,33 @@
-# slopbooru, for nix.
+# slopbooru, for nix: the booru (frontend) and imgrec (the recognition
+# backend that fills its db).
 #
-#   nix-build -A slopbooru          # this machine's binary
-#   nix-build -A release            # linux + windows, amd64 + arm64, SHA256SUMS
-#   nix-build -A tests              # unit tests, the linux and windows (wine)
-#                                   # end-to-end checks
+#   nix-build -A slopbooru          # the booru, this machine's binary
+#   nix-build -A release            # the booru for linux + windows, amd64 + arm64, SHA256SUMS
+#   nix-build -A imgrec             # the backend, bundled with its engine and models
+#   nix-build -A tests              # unit tests (both), the booru's linux and
+#                                   # windows (wine) end-to-end checks
 #   nix-shell                       # go, gopls, wine, sqlite
 #
-# Every binary is static Go with cgo off: no libc, no libsqlite3, nothing
-# from the host. Building them needs nothing but go, so the windows and
-# arm64 ones are cross-compiled from here.
+# The booru is static Go with cgo off: no libc, no libsqlite3, nothing from
+# the host, so the windows and arm64 binaries are cross-compiled from here.
+# The backend is nix-only: its engine is a virtualenv of cuda wheels (see
+# imgrec/nix).
 {
-  # the nixpkgs llm-qwen's flake.lock pins, so both build with one go
+  system ? builtins.currentSystem,
+  # pinned: the engine (cuda wheels, patched at build time) was built and
+  # run on a real card against exactly this nixpkgs
   pkgs ? import (builtins.fetchTarball {
     url = "https://releases.nixos.org/nixpkgs/nixpkgs-26.11pre1107841.9d3b8db48266/nixexprs.tar.zst";
     sha256 = "sha256-WqewjvVjGQ1yhAvxeZW7IKoIT08vUNfyaeZewOwyYxg=";
-  }) { },
-  # a command line for a reference booru to diff every page against (the
-  # Python one this was ported from); null leaves that test out
-  reference ? null,
+  }) { inherit system; config = { }; overlays = [ ]; },
+  # the model fetcher (nornpkgs' lib.fetchHuggingFace, which takes pkgs as
+  # an argument); by default from the nornpkgs revision the models were
+  # first fetched with, so their store paths stay the same
+  fetchHuggingFace ?
+    (import "${builtins.fetchTarball {
+      url = "https://github.com/warmdarksea/nornpkgs/archive/a71bf3010cc0284b8937de3b6f7b0c570e065b2a.tar.gz";
+      sha256 = "sha256-IqfYXTo7g//eVjRRsLDOmViy3D+KsN/c9kafH3PdQNM=";
+    }}/lib/models.nix" pkgs).fetchHuggingFace,
 }:
 let
   inherit (pkgs) lib;
@@ -32,17 +42,20 @@ let
       ./style.css
       ./internal/fixture/schema.sql
       ./internal/fixture/schema_fts.sql
+      ./imgrec/specs
+      ./imgrec/internal/store/schema.sql
+      ./imgrec/internal/store/schema_fts.sql
       (lib.fileset.fileFilter (f: f.hasExt "go") ./.)
     ];
   };
+  vendorHash = "sha256-uTcdpSdTVPofhkgybBLEDA90pbyLDZ79cHGxcnWCSt0=";
 
   # the module cache, fetched once (a fixed-output derivation): every
   # target below builds from it offline
   vendor =
     (pkgs.buildGoModule {
       pname = "slopbooru";
-      inherit version src;
-      vendorHash = "sha256-uTcdpSdTVPofhkgybBLEDA90pbyLDZ79cHGxcnWCSt0=";
+      inherit version src vendorHash;
     }).goModules;
 
   goEnv = ''
@@ -92,6 +105,10 @@ let
     linux-arm64 = build { goos = "linux"; goarch = "arm64"; };
     windows-amd64 = build { goos = "windows"; goarch = "amd64"; };
     windows-arm64 = build { goos = "windows"; goarch = "arm64"; };
+  };
+
+  imgrec = import ./imgrec/nix {
+    inherit pkgs src vendorHash version fetchHuggingFace;
   };
 
   native = build {
@@ -155,14 +172,6 @@ let
         ''
       else
         null;
-
-    parity =
-      if reference == null then
-        null
-      else
-        check "parity" ''
-          slopcheck -bin ${native}/bin/slopbooru -ref ${lib.escapeShellArg reference}
-        '';
   };
 
   release = pkgs.runCommand "slopbooru-${version}" { } ''
@@ -180,12 +189,16 @@ targets
 // {
   inherit
     build
+    imgrec
     release
     slopcheck
     vendor
     version
     ;
   slopbooru = native;
+  imgrec-bin = imgrec.bin;
+  vllm-env = imgrec.engine;
+  inherit (imgrec) lock-engine;
   tests = tests // {
     all = pkgs.linkFarm "slopbooru-tests" (lib.mapAttrs (_: t: t) tests);
   };

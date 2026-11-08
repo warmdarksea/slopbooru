@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"imgrec/internal/pipeline"
-	"imgrec/internal/runner"
-	"imgrec/internal/spec"
+	"slopbooru/imgrec/internal/pipeline"
+	"slopbooru/imgrec/internal/runner"
+	"slopbooru/imgrec/internal/spec"
 )
 
 // Scheduler applies Decide to real runners and feeds them jobs.

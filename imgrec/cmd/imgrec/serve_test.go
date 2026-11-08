@@ -19,9 +19,9 @@ import (
 	"testing"
 	"time"
 
-	"imgrec/internal/api"
-	"imgrec/internal/auth"
-	"imgrec/internal/sched"
+	"slopbooru/imgrec/internal/api"
+	"slopbooru/imgrec/internal/auth"
+	"slopbooru/imgrec/internal/sched"
 )
 
 type apiClient struct {

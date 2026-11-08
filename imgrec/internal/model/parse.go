@@ -13,8 +13,8 @@ import (
 	"regexp"
 	"strings"
 
-	"imgrec/internal/grounding"
-	"imgrec/internal/pyjson"
+	"slopbooru/imgrec/internal/grounding"
+	"slopbooru/imgrec/internal/pyjson"
 )
 
 // Contribution is one model's answer about one image.

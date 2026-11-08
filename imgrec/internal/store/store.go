@@ -21,9 +21,9 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"imgrec/internal/grounding"
-	"imgrec/internal/model"
-	"imgrec/internal/pyjson"
+	"slopbooru/imgrec/internal/grounding"
+	"slopbooru/imgrec/internal/model"
+	"slopbooru/imgrec/internal/pyjson"
 )
 
 //go:embed schema.sql

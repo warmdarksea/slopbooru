@@ -37,10 +37,10 @@ import (
 	"strings"
 	"time"
 
-	"imgrec/internal/auth"
-	"imgrec/internal/pipeline"
-	"imgrec/internal/records"
-	"imgrec/internal/sched"
+	"slopbooru/imgrec/internal/auth"
+	"slopbooru/imgrec/internal/pipeline"
+	"slopbooru/imgrec/internal/records"
+	"slopbooru/imgrec/internal/sched"
 )
 
 type Server struct {

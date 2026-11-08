@@ -21,14 +21,14 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"imgrec/internal/grounding"
-	"imgrec/internal/images"
-	"imgrec/internal/imagestore"
-	"imgrec/internal/model"
-	"imgrec/internal/pyjson"
-	"imgrec/internal/records"
-	"imgrec/internal/spec"
-	"imgrec/internal/store"
+	"slopbooru/imgrec/internal/grounding"
+	"slopbooru/imgrec/internal/images"
+	"slopbooru/imgrec/internal/imagestore"
+	"slopbooru/imgrec/internal/model"
+	"slopbooru/imgrec/internal/pyjson"
+	"slopbooru/imgrec/internal/records"
+	"slopbooru/imgrec/internal/spec"
+	"slopbooru/imgrec/internal/store"
 )
 
 const jobsSchema = `

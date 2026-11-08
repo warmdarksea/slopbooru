@@ -6,7 +6,7 @@ import (
 	"os"
 	"sort"
 
-	"imgrec/internal/records"
+	"slopbooru/imgrec/internal/records"
 )
 
 // imgrec rebuild-store: the store (what the booru reads) is derived from

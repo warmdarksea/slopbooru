@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"imgrec/internal/pyjson"
+	"slopbooru/imgrec/internal/pyjson"
 )
 
 var (

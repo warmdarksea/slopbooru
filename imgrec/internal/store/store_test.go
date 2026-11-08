@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"imgrec/internal/model"
+	"slopbooru/imgrec/internal/model"
 )
 
 // A newer answer to the same question replaces the older one's rows, even

@@ -20,7 +20,7 @@ import (
 	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
 
-	"imgrec/internal/store"
+	"slopbooru/imgrec/internal/store"
 )
 
 // mime by decoder name, as Pillow's Image.MIME names them

@@ -1,0 +1,21 @@
+# imgrec's engine: the python environment, declaratively: uv resolves this into
+# uv.lock (every wheel pinned by url + hash), and the uv2nix overlay
+# turns that lock into a nix-built virtualenv (imgrec/nix/engine.nix).
+# Regenerate the lock after changing deps:  $(nix-build -A lock-engine)/bin/lock-engine
+[project]
+# the name is the one it had in llm-qwen: changing it re-locks and rebuilds
+# the env for nothing
+name = "llm-qwen-env"
+version = "0.1.0"
+requires-python = "==3.14.*"
+dependencies = [
+  "vllm==0.33.0",
+  # the pixai tagger (imgrec/runners/pixai_worker.py) rides the same env: it only
+  # adds timm on top of what vllm already pulls in (torch, torchvision,
+  # transformers, pillow).
+  "timm>=1.0",
+]
+
+# uv is only a resolver here; nothing is ever built from this project itself.
+[tool.uv]
+package = false

@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"imgrec/internal/pipeline"
+	"slopbooru/imgrec/internal/pipeline"
 )
 
 func jobs(client string, n int) []pipeline.Job {

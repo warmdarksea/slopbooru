@@ -26,8 +26,8 @@ import (
 	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
 
-	"imgrec/internal/images"
-	"imgrec/internal/store"
+	"slopbooru/imgrec/internal/images"
+	"slopbooru/imgrec/internal/store"
 )
 
 type Store struct{ Root string }

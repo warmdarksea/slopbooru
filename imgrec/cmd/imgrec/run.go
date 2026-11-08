@@ -20,13 +20,13 @@ import (
 	"syscall"
 	"time"
 
-	"imgrec/internal/imagestore"
-	"imgrec/internal/pipeline"
-	"imgrec/internal/records"
-	"imgrec/internal/runner"
-	"imgrec/internal/sched"
-	"imgrec/internal/spec"
-	"imgrec/internal/store"
+	"slopbooru/imgrec/internal/imagestore"
+	"slopbooru/imgrec/internal/pipeline"
+	"slopbooru/imgrec/internal/records"
+	"slopbooru/imgrec/internal/runner"
+	"slopbooru/imgrec/internal/sched"
+	"slopbooru/imgrec/internal/spec"
+	"slopbooru/imgrec/internal/store"
 )
 
 // fleet is everything a run needs, from flags shared by run and serve.

@@ -17,10 +17,10 @@ import (
 	"os"
 	"strings"
 
-	"imgrec/internal/images"
-	"imgrec/internal/model"
-	"imgrec/internal/pyjson"
-	"imgrec/internal/store"
+	"slopbooru/imgrec/internal/images"
+	"slopbooru/imgrec/internal/model"
+	"slopbooru/imgrec/internal/pyjson"
+	"slopbooru/imgrec/internal/store"
 )
 
 type manifestModel struct {
