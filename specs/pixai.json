@@ -9,6 +9,7 @@
   },
   "runner": {
     "type": "pixai",
+    "gpu": 0.15,
     "batch": 16,
     "device": "cuda"
   },

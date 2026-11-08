@@ -3,6 +3,7 @@
 //
 //	imgrec-stub serve WEIGHTS --served-model-name NAME --port N ...   # vllm serve
 //	imgrec-stub SCRIPT --model PATH ... IMAGE...                       # the pixai tagger
+//	imgrec-stub pixai-worker                                           # the pixai worker
 //
 // Replies are canned per kind of model and picked by the image's sha256,
 // so a run is deterministic, and they cover what the parsers must handle:
@@ -12,6 +13,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -32,6 +34,10 @@ func pick(sha [32]byte, n int) int { return int(sha[0]) % n }
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "serve" {
 		serve(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "pixai-worker" {
+		worker()
 		return
 	}
 	tagger(os.Args[1:])
@@ -190,6 +196,39 @@ func reply(kind string, sha [32]byte) (string, any, int) {
 
 // ---- the tagger ----------------------------------------------------------
 
+// tag is the canned contribution for one image.
+func tag(img string, data []byte) map[string]any {
+	sha := sha256.Sum256(data)
+	switch pick(sha, 3) {
+	case 0:
+		return map[string]any{"image": img, "model": "pixai", "success": true,
+			"fields": map[string]any{"tags": []any{"1girl", "solo", "witch_hat"},
+				"subjects": []any{map[string]any{"name": "kirisame_marisa", "probability": 0.912}},
+				"source":   []any{"touhou"}, "rating": "safe"},
+			"detail": map[string]any{
+				"rating": map[string]any{"safe": 0.81, "sensitive": 0.15, "questionable": 0.03, "explicit": 0.01},
+				"scores": map[string]any{
+					"tag":     map[string]any{"1girl": 0.9871, "solo": 0.9502, "witch_hat": 0.8812},
+					"subject": map[string]any{"kirisame_marisa": 0.9123},
+					"source":  map[string]any{"touhou": 0.9655},
+					"rating":  map[string]any{"safe": 0.81, "sensitive": 0.15, "questionable": 0.03, "explicit": 0.01}}}}
+	case 1:
+		return map[string]any{"image": img, "model": "pixai", "success": true,
+			"fields": map[string]any{"tags": []any{"no_humans", "scenery"}, "subjects": []any{},
+				"source": []any{}, "rating": "sensitive"},
+			"detail": map[string]any{
+				"rating": map[string]any{"safe": 0.3, "sensitive": 0.6, "questionable": 0.07, "explicit": 0.03},
+				"scores": map[string]any{"tag": map[string]any{"no_humans": 0.99, "scenery": 0.7},
+					"subject": map[string]any{}, "source": map[string]any{},
+					"rating": map[string]any{"safe": 0.3, "sensitive": 0.6, "questionable": 0.07, "explicit": 0.03}}}}
+	default:
+		return map[string]any{"image": img, "model": "pixai", "success": false,
+			"error": "cannot identify image file"}
+	}
+}
+
+// tagger is pixai_tag.py: every image named on the command line, one json
+// line each, then exit.
 func tagger(args []string) {
 	var images []string
 	for i := 1; i < len(args); i++ { // args[0] is the script
@@ -207,32 +246,32 @@ func tagger(args []string) {
 			enc.Encode(map[string]any{"image": img, "model": "pixai", "success": false, "error": err.Error()})
 			continue
 		}
-		sha := sha256.Sum256(data)
-		switch pick(sha, 3) {
-		case 0:
-			enc.Encode(map[string]any{"image": img, "model": "pixai", "success": true,
-				"fields": map[string]any{"tags": []any{"1girl", "solo", "witch_hat"},
-					"subjects": []any{map[string]any{"name": "kirisame_marisa", "probability": 0.912}},
-					"source":   []any{"touhou"}, "rating": "safe"},
-				"detail": map[string]any{
-					"rating": map[string]any{"safe": 0.81, "sensitive": 0.15, "questionable": 0.03, "explicit": 0.01},
-					"scores": map[string]any{
-						"tag":     map[string]any{"1girl": 0.9871, "solo": 0.9502, "witch_hat": 0.8812},
-						"subject": map[string]any{"kirisame_marisa": 0.9123},
-						"source":  map[string]any{"touhou": 0.9655},
-						"rating":  map[string]any{"safe": 0.81, "sensitive": 0.15, "questionable": 0.03, "explicit": 0.01}}}})
-		case 1:
-			enc.Encode(map[string]any{"image": img, "model": "pixai", "success": true,
-				"fields": map[string]any{"tags": []any{"no_humans", "scenery"}, "subjects": []any{},
-					"source": []any{}, "rating": "sensitive"},
-				"detail": map[string]any{
-					"rating": map[string]any{"safe": 0.3, "sensitive": 0.6, "questionable": 0.07, "explicit": 0.03},
-					"scores": map[string]any{"tag": map[string]any{"no_humans": 0.99, "scenery": 0.7},
-						"subject": map[string]any{}, "source": map[string]any{},
-						"rating": map[string]any{"safe": 0.3, "sensitive": 0.6, "questionable": 0.07, "explicit": 0.03}}}})
-		default:
-			enc.Encode(map[string]any{"image": img, "model": "pixai", "success": false,
-				"error": "cannot identify image file"})
+		enc.Encode(tag(img, data))
+	}
+}
+
+// worker is runners/pixai_worker.py: {"ready": true}, then one answer per
+// {"id", "path"} request line, until stdin closes.
+func worker() {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetEscapeHTML(false)
+	enc.Encode(map[string]any{"ready": true})
+	sc := bufio.NewScanner(os.Stdin)
+	for sc.Scan() {
+		var req struct {
+			ID   int64  `json:"id"`
+			Path string `json:"path"`
 		}
+		if json.Unmarshal(sc.Bytes(), &req) != nil {
+			continue
+		}
+		var out map[string]any
+		if data, err := os.ReadFile(req.Path); err != nil {
+			out = map[string]any{"image": req.Path, "model": "pixai", "success": false, "error": err.Error()}
+		} else {
+			out = tag(req.Path, data)
+		}
+		out["id"] = req.ID
+		enc.Encode(out)
 	}
 }
