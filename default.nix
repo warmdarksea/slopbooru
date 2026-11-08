@@ -1,17 +1,15 @@
-# slopbooru, for nix: the booru (frontend) and imgrec (the recognition
-# backend that fills its db).
+# slopbooru, for nix: the booru, and the fleet of models it asks.
 #
 #   nix-build -A slopbooru          # the booru, this machine's binary
 #   nix-build -A release            # the booru for linux + windows, amd64 + arm64, SHA256SUMS
-#   nix-build -A imgrec             # the backend, bundled with its engine and models
-#   nix-build -A tests              # unit tests (both), the booru's linux and
-#                                   # windows (wine) end-to-end checks
+#   nix-build -A tests              # unit tests, the booru's linux and windows (wine) end-to-end checks
+#   nix-build -A fleet.timeshare-toml   # the models, as a gpu-timeshare config (nix-only: cuda wheels)
 #   nix-shell                       # go, gopls, wine, sqlite
 #
 # The booru is static Go with cgo off: no libc, no libsqlite3, nothing from
 # the host, so the windows and arm64 binaries are cross-compiled from here.
-# The backend is nix-only: its engine is a virtualenv of cuda wheels (see
-# imgrec/nix).
+# `slopbooru classify` asks any OpenAI-compatible server (gpu-timeshare
+# with the fleet, or a hosted API); the fleet is nix-only (fleet/).
 {
   system ? builtins.currentSystem,
   # pinned: the engine (cuda wheels, patched at build time) was built and
@@ -42,13 +40,13 @@ let
       ./style.css
       ./internal/fixture/schema.sql
       ./internal/fixture/schema_fts.sql
-      ./imgrec/specs
-      ./imgrec/internal/store/schema.sql
-      ./imgrec/internal/store/schema_fts.sql
+      ./internal/store/schema.sql
+      ./internal/store/schema_fts.sql
+      ./classify.toml
       (lib.fileset.fileFilter (f: f.hasExt "go") ./.)
     ];
   };
-  vendorHash = "sha256-uTcdpSdTVPofhkgybBLEDA90pbyLDZ79cHGxcnWCSt0=";
+  vendorHash = "sha256-+D9ovT30kAek/KRjZ5EwV4jeQm7hEKbefBsCWAxGbnE=";
 
   # the module cache, fetched once (a fixed-output derivation): every
   # target below builds from it offline
@@ -107,8 +105,8 @@ let
     windows-arm64 = build { goos = "windows"; goarch = "arm64"; };
   };
 
-  imgrec = import ./imgrec/nix {
-    inherit pkgs src vendorHash version fetchHuggingFace;
+  fleet = import ./fleet {
+    inherit pkgs fetchHuggingFace;
   };
 
   native = build {
@@ -189,16 +187,14 @@ targets
 // {
   inherit
     build
-    imgrec
+    fleet
     release
     slopcheck
     vendor
     version
     ;
   slopbooru = native;
-  imgrec-bin = imgrec.unwrapped;
-  vllm-env = imgrec.engine;
-  inherit (imgrec) lock-engine;
+  inherit (fleet) vllm-env lock-engine;
   tests = tests // {
     all = pkgs.linkFarm "slopbooru-tests" (lib.mapAttrs (_: t: t) tests);
   };

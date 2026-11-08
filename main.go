@@ -43,6 +43,17 @@ func die(format string, a ...any) {
 }
 
 func main() {
+	// slopbooru classify ...: ask models, into the db (classify.go);
+	// slopbooru [serve] ...: browse it
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "classify":
+			classifyMain(os.Args[2:])
+			return
+		case "serve":
+			os.Args = append(os.Args[:1], os.Args[2:]...)
+		}
+	}
 	fs := flag.NewFlagSet(brand, flag.ExitOnError)
 	db := fs.String("db", "", "the results.db to browse (required)")
 	images := fs.String("images", "", "the directory holding the pictures; found by content, so names and layout\n"+
@@ -55,7 +66,8 @@ func main() {
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "%s %s: browse an image recognition db\n\n"+
-			"usage: %s --db results.db --images DIR [--host 127.0.0.1] [--port 8800]\n\n",
+			"usage: %[3]s [serve] --db results.db --images DIR [--host 127.0.0.1] [--port 8800]\n"+
+			"       %[3]s classify --images DIR [--db results.db] [--config classify.toml]  (see %[3]s classify -h)\n\n",
 			brand, version, filepath.Base(os.Args[0]))
 		fs.PrintDefaults()
 	}

@@ -323,3 +323,15 @@ func dropHashes(db *sql.DB, keys []fileKey) error {
 	}
 	return tx.Commit()
 }
+
+// Hashes are every content in the index, sorted.
+func (ix *Index) Hashes() []string {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	out := make([]string, 0, len(ix.byHash))
+	for h := range ix.byHash {
+		out = append(out, h)
+	}
+	sort.Strings(out)
+	return out
+}

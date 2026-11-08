@@ -2,19 +2,20 @@
 
 A small booru for browsing what a fleet of image models said about a
 directory of pictures: tags, characters, ratings, descriptions, OCR'd text
-with its boxes, safety verdicts, each value with its model and confidence.
-It reads the sqlite db written by an image recognition pipeline and serves
-it as plain html, laid out like a booru: the tags, characters, sources,
-moods and hazards on a sidebar to the left, thumbnails beside it, and on an
-image's page the picture fitted to the screen (click for full size) with
-the models' descriptions underneath. No JavaScript framework, no external
-assets.
+with its boxes, and safety verdicts. Each value shows its model and
+confidence.
 
-The pipeline that writes the db is in this repository too: **imgrec**
-([imgrec/](imgrec/), design in [imgrec/DESIGN.md](imgrec/DESIGN.md)), a
-scheduler and HTTP service in front of seven vision models on one GPU.
-The booru is a plain download for any platform; imgrec is built with nix
-only (see [The backend](#the-backend-imgrec)).
+Pages are plain html, laid out like a booru:
+- tags, characters, sources, moods and hazards on a sidebar to the left,
+  thumbnails beside it;
+- on an image's page, the picture fitted to the screen (click for full
+  size) with the models' descriptions underneath.
+
+There's no JavaScript framework and no external assets.
+
+It also asks the models: `slopbooru classify` sends every picture to every
+configured model, through any server that speaks the OpenAI API, and
+writes the answers into the db the booru reads (see [Classifying](#classifying)).
 
 One file per platform with nothing to install: static binaries for Linux
 (any distro, any glibc or none) and Windows 10+, on amd64 and arm64.
@@ -22,7 +23,7 @@ One file per platform with nothing to install: static binaries for Linux
 ## Running it
 
 ```
-slopbooru --db results.db --images PICTURES_DIR [--host 127.0.0.1] [--port 8800]
+slopbooru [serve] --db results.db --images PICTURES_DIR [--host 127.0.0.1] [--port 8800]
 ```
 
 then open <http://127.0.0.1:8800>. On Windows it's `slopbooru.exe` with
@@ -74,28 +75,86 @@ Editing is off by default. With `--edit`, anyone who can reach the
 address and port can edit, so keep `--host 127.0.0.1` unless you trust
 the network. The db file must be writable.
 
-## The backend: imgrec
-
-imgrec fills the db: it runs every picture through seven vision models
-(vllm servers plus the pixai tagger) on one GPU, caching every answer by
-the full question, and serves an HTTP API in front of them with a
-token per client. It is built with nix only -- its engine is a virtualenv
-of ~200 cuda wheels, patched at build time, that only nix keeps
-reproducible:
+## Classifying
 
 ```
-nix-build -A imgrec                   # bundled with its engine and models (~75 GB of weights)
-imgrec run --db pics/results.db pics  # batch: every picture on every model
-imgrec serve --db imgrec.db --listen 0.0.0.0:8100 \
-  --tls-cert imgrec.crt --tls-key imgrec.key
-imgrec cert --hosts library,10.0.0.2  # a self-signed certificate for the above
-imgrec client --db imgrec.db add alice   # prints alice's token, once
-imgrec submit --server https://library:8100 --cacert imgrec.crt --token T pictures/*
+slopbooru classify --images PICTURES_DIR [--db results.db] [--config classify.toml] [--models a,b]
 ```
 
-On NixOS, nornpkgs has it as a service (`services.imgrec`). Then point
-the booru at the same db. The design and its decisions are in
-[imgrec/DESIGN.md](imgrec/DESIGN.md).
+This asks each configured model about every picture in the folder
+(searched recursively, found by content) and writes what they said into
+the db. The db defaults to `PICTURES_DIR/results.db`.
+
+**What gets asked.** The models, and what each is asked, are in
+[`classify.toml`](classify.toml), built in:
+- seven models for anime-ish pictures: tagger, two JSON describers, two
+  captioners, OCR, and a safety verdict;
+- one backend, `http://127.0.0.1:8100/v1`.
+
+A `--config` file is read on top of it. An entry with the same name
+replaces the built-in one whole, and `enabled = false` drops a model. A
+model entry holds:
+- its prompt and optional system prompt;
+- a JSON schema, for answers that are structured;
+- any request parameters;
+- `max_pixels`: bigger pictures are downscaled before sending;
+- its `kind`, which says how its answer is read.
+
+`slopbooru classify --print-config` prints the built-in file.
+
+**Backends.** A backend is anything with the OpenAI API:
+- [gpu-timeshare](https://github.com/warmdarksea/gpu-timeshare) running
+  this repository's fleet (below);
+- one vllm or llama.cpp server;
+- a hosted API.
+
+```toml
+[backends.timeshare]
+url = "https://library:8100/v1"
+token_env = "SLOPBOORU_TOKEN"     # or token = "...", token_file = "..."
+cacert = "timeshare.crt"          # a self-signed server's certificate
+mode = "batch"                    # the Batch API; "requests" for one request per picture
+```
+
+In batch mode, each model's pictures go up as one or more batches. The
+server decides the order, which is what lets gpu-timeshare answer one
+model at a time instead of reloading models back and forth. Batches
+survive an interrupted run: the next run collects them first.
+
+**Answers are kept.** Every answer is stored verbatim in the db, keyed by
+the picture and the question, where the question is the model's whole
+config entry. As a result:
+- a picture that already has an answer to the current question isn't asked again;
+- a stopped run resumes where it stopped;
+- a new picture costs one request per model;
+- an edited prompt asks everything again, and the new answers are stored
+  beside the old ones;
+- `--reparse` rebuilds the db's rows from the kept answers without asking anyone.
+
+A model that reads another model's answer, like llama-guard reading a
+description, is asked after that model.
+
+## The fleet
+
+[`fleet/`](fleet/) is the models the built-in config names, as
+gpu-timeshare models. It's nix-only: the engine is a virtualenv of about
+200 cuda wheels, patched at build time, which only nix keeps reproducible.
+It contains:
+- the engine, vllm;
+- the weights, pinned by revision and hash, about 75 GB in all;
+- each model's vllm settings and share of the card;
+- `fleet/pixai_server.py`, which puts pixai behind the OpenAI API.
+
+```
+nix-build -A fleet.timeshare-toml     # a timeshare.toml running every model as a child process
+timeshare serve --config result       # (with gpu-timeshare), then: slopbooru classify ...
+```
+
+On NixOS, nornpkgs runs gpu-timeshare as a service with these models,
+each in its own sandboxed unit.
+
+The split: everything about *serving* a model lives in `fleet/`, and
+everything about *asking* it lives in `classify.toml`.
 
 ## Building
 
@@ -118,6 +177,9 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" .
 ## Tests
 
 - `go test ./...`: the formatting helpers, query parsing, EXIF orientation,
+  classify against a fake OpenAI backend (batch and requests modes, resume,
+  reparse, a guard reading a describer, downscaling, failures), the reply
+  parsers and the store writer,
   the hash cache, and the http handler on a generated fixture.
 - `go run ./cmd/slopcheck -bin ./slopbooru`: end to end against a real
   binary. It builds a fixture db and pictures, moves and renames the
