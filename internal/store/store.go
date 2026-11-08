@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	_ "embed"
 	"encoding/hex"
+	"fmt"
 	"math"
 	"path/filepath"
 	"sort"
@@ -173,6 +174,9 @@ func nullable[T comparable](v T) any {
 func (s *Store) imageID(tx *sql.Tx, im Image) (int64, error) {
 	var id int64
 	err := tx.QueryRow("SELECT id FROM images WHERE sha256 = ?", im.SHA256).Scan(&id)
+	if err == sql.ErrNoRows && im.Path == "" && im.Bytes == 0 {
+		return 0, fmt.Errorf("picture %s: not in the store and not on disk", im.SHA256)
+	}
 	if err == sql.ErrNoRows {
 		r, err := tx.Exec("INSERT INTO images(sha256, bytes, mime, width, height) VALUES (?, ?, ?, ?, ?)",
 			im.SHA256, im.Bytes, nullable(im.Mime), nullable(im.Width), nullable(im.Height))

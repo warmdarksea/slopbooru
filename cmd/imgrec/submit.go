@@ -1,8 +1,8 @@
 package main
 
-// imgrec submit: the client. Asks the server which models it has, uploads
-// each picture, asks for each (picture, model) job, and waits for the
-// answers. Every call is idempotent, so a crashed or interrupted submit is
+// imgrec submit: the client. Asks the server which models it has, then
+// for each picture asks every job by hash, sends the picture once (only if
+// some model needs it), and waits for the answers. Every call is idempotent, so a crashed or interrupted submit is
 // simply run again with the same inputs: what's answered comes back at
 // once, and nothing is queued twice. Results go to stdout, one json line
 // per job.
@@ -15,8 +15,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -28,13 +30,21 @@ type client struct {
 }
 
 func (c *client) do(method, path string, body io.Reader, out any) (int, string, error) {
+	ctype := ""
+	if method == "POST" {
+		ctype = "application/json"
+	}
+	return c.doType(method, path, ctype, body, out)
+}
+
+func (c *client) doType(method, path, ctype string, body io.Reader, out any) (int, string, error) {
 	req, err := http.NewRequest(method, c.base+path, body)
 	if err != nil {
 		return 0, "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	if method == "POST" && path == "/v1/jobs" {
-		req.Header.Set("content-type", "application/json")
+	if ctype != "" {
+		req.Header.Set("content-type", ctype)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -46,8 +56,14 @@ func (c *client) do(method, path string, body io.Reader, out any) (int, string, 
 		return 0, "", err
 	}
 	if resp.StatusCode >= 400 {
-		var e struct{ Error string }
+		var e struct {
+			Error     string
+			NeedImage bool `json:"need_image"`
+		}
 		json.Unmarshal(data, &e)
+		if e.NeedImage && out != nil {
+			json.Unmarshal(data, out)
+		}
 		return resp.StatusCode, "", fmt.Errorf("%s %s: %d %s", method, path, resp.StatusCode, e.Error)
 	}
 	if out != nil {
@@ -113,7 +129,21 @@ func submitCmd(args []string) error {
 	}
 	type pending struct{ file, url string }
 	var waiting []pending
-	done, failed := 0, 0
+	done, failed, sent := 0, 0, 0
+	// one job's reply, from either kind of POST: done, queued or failed
+	settle := func(file string, code int, res map[string]any) {
+		switch {
+		case code == 202:
+			waiting = append(waiting, pending{file, res["location"].(string)})
+		default:
+			emit(file, res)
+			if res["status"] == "done" {
+				done++
+			} else {
+				failed++
+			}
+		}
+	}
 	for _, file := range fs.Args() {
 		data, err := os.ReadFile(file)
 		if err != nil {
@@ -121,31 +151,55 @@ func submitCmd(args []string) error {
 		}
 		h := sha256.Sum256(data)
 		sha := hex.EncodeToString(h[:])
-		if _, _, err := c.do("PUT", "/v1/images/"+sha, bytes.NewReader(data), nil); err != nil {
-			fmt.Fprintf(os.Stderr, "imgrec: %s: %v\n", file, err)
-			failed += len(models)
-			continue
-		}
+		// by hash first: the picture travels only if the server needs it
+		var need []string
 		for _, m := range models {
 			body, _ := json.Marshal(map[string]string{"image": sha, "model": m})
 			var res map[string]any
 			code, loc, err := c.do("POST", "/v1/jobs", bytes.NewReader(body), &res)
 			switch {
+			case code == 404 && res["need_image"] == true:
+				need = append(need, m)
 			case err != nil:
 				fmt.Fprintf(os.Stderr, "imgrec: %s on %s: %v\n", m, file, err)
 				failed++
-			case code == 202:
-				waiting = append(waiting, pending{file, loc})
 			default:
-				emit(file, res)
-				if res["status"] == "done" {
-					done++
-				} else {
-					failed++
+				if code == 202 {
+					res["location"] = loc
 				}
+				settle(file, code, res)
 			}
 		}
+		if len(need) == 0 {
+			continue
+		}
+		// once, for every model that needs it
+		var body bytes.Buffer
+		mw := multipart.NewWriter(&body)
+		mw.WriteField("image", sha)
+		mw.WriteField("models", strings.Join(need, ","))
+		fw, _ := mw.CreateFormFile("file", filepath.Base(file))
+		fw.Write(data)
+		mw.Close()
+		var res struct {
+			Jobs []map[string]any `json:"jobs"`
+		}
+		_, _, err = c.doType("POST", "/v1/jobs", mw.FormDataContentType(), &body, &res)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "imgrec: %s: %v\n", file, err)
+			failed += len(need)
+			continue
+		}
+		sent++
+		for _, j := range res.Jobs {
+			code := 200
+			if j["status"] == "queued" {
+				code = 202
+			}
+			settle(file, code, j)
+		}
 	}
+	fmt.Fprintf(os.Stderr, "imgrec: %d picture(s) had to be sent\n", sent)
 	fmt.Fprintf(os.Stderr, "imgrec: %d answered already, %d queued, %d failed\n", done, len(waiting), failed)
 
 	// wait for the rest, a few at a time, each poll held by the server

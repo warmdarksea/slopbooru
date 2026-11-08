@@ -1,7 +1,8 @@
 {
   "name": "llamaguard",
   "input": {
-    "max_pixels": 2500000
+    "max_pixels": 2500000,
+    "resize": "catmull-rom/png v1"
   },
   "kind": "guard",
   "server": {

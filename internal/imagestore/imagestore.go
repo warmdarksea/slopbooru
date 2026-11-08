@@ -32,6 +32,11 @@ import (
 
 type Store struct{ Root string }
 
+// Resize names the downscaling this package does. Specs declare it in
+// their input (it is part of every cache key), and Input refuses any
+// other name: a spec can't claim a method the code doesn't use.
+const Resize = "catmull-rom/png v1"
+
 var exts = map[string]string{"jpeg": ".jpg", "png": ".png", "gif": ".gif", "webp": ".webp",
 	"bmp": ".bmp", "tiff": ".tiff"}
 
@@ -43,35 +48,38 @@ func New(root string) (*Store, error) {
 	return &Store{abs}, os.MkdirAll(filepath.Join(abs, "standins"), 0o755)
 }
 
-// Put stores a picture and describes it. Rejects what no decoder reads.
-func (s *Store) Put(r io.Reader) (store.Image, error) {
+// Put stores a picture and describes it; created is false when the same
+// bytes were already here. Rejects what no decoder reads.
+func (s *Store) Put(r io.Reader) (im store.Image, created bool, err error) {
 	tmp, err := os.CreateTemp(s.Root, ".in-*")
 	if err != nil {
-		return store.Image{}, err
+		return store.Image{}, false, err
 	}
 	defer os.Remove(tmp.Name())
 	h := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(tmp, h), r); err != nil {
 		tmp.Close()
-		return store.Image{}, err
+		return store.Image{}, false, err
 	}
 	tmp.Seek(0, io.SeekStart)
 	_, format, err := image.DecodeConfig(tmp)
 	tmp.Close()
 	if err != nil {
-		return store.Image{}, fmt.Errorf("not a picture: %w", err)
+		return store.Image{}, false, fmt.Errorf("not a picture: %w", err)
 	}
 	sha := hex.EncodeToString(h.Sum(nil))
 	dest := filepath.Join(s.Root, sha[:2], sha+exts[format])
 	if _, err := os.Stat(dest); err != nil {
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-			return store.Image{}, err
+			return store.Image{}, false, err
 		}
 		if err := os.Rename(tmp.Name(), dest); err != nil {
-			return store.Image{}, err
+			return store.Image{}, false, err
 		}
+		created = true
 	}
-	return images.Describe(dest)
+	im, err = images.Describe(dest)
+	return im, created, err
 }
 
 // PutFile stores a picture from a path.
@@ -81,7 +89,22 @@ func (s *Store) PutFile(path string) (store.Image, error) {
 		return store.Image{}, err
 	}
 	defer f.Close()
-	return s.Put(f)
+	im, _, err := s.Put(f)
+	return im, err
+}
+
+// Remove deletes a picture and its stand-ins.
+func (s *Store) Remove(sha string) error {
+	if p := s.Path(sha); p != "" {
+		if err := os.Remove(p); err != nil {
+			return err
+		}
+	}
+	standins, _ := filepath.Glob(filepath.Join(s.Root, "standins", sha+"-*"))
+	for _, p := range standins {
+		os.Remove(p)
+	}
+	return nil
 }
 
 // Path is where a picture is, or "".
@@ -99,7 +122,10 @@ func (s *Store) Path(sha string) string {
 // Input is what a model is shown for a picture: the picture itself, or,
 // over maxPixels, a downscaled stand-in (a 13 MP photo is ~16k image
 // tokens against an 8k context). Returns its path and sha256.
-func (s *Store) Input(sha string, maxPixels int) (string, string, error) {
+func (s *Store) Input(sha string, maxPixels int, method string) (string, string, error) {
+	if maxPixels > 0 && method != Resize {
+		return "", "", fmt.Errorf("resize %q: this build does %q", method, Resize)
+	}
 	path := s.Path(sha)
 	if path == "" {
 		return "", "", fmt.Errorf("no picture %s", sha)

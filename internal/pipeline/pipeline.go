@@ -1,10 +1,12 @@
 // Package pipeline is what a job is: one image on one model.
 //
-// Intake is the whole cache rule: compute the key; a record under it means
-// done; otherwise make sure a jobs row exists. Execute runs one job and
-// leaves a record behind, so running intake again is a hit. The jobs
-// table only ever holds outstanding work: a crash loses nothing, the
-// answer simply isn't there yet.
+// Intake is the whole cache rule: compute the key -- from the picture's
+// hash alone, so a hit needs no picture; a record under it means done;
+// otherwise, if the picture is here, make sure a jobs row exists, and if
+// it isn't, say so (NeedImage). Execute runs one job and leaves a record
+// behind, so running intake again is a hit. The jobs table only ever holds
+// outstanding work: a crash loses nothing, the answer simply isn't there
+// yet. Uploaded pictures are deleted once no job needs them (Sweep).
 package pipeline
 
 import (
@@ -13,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +40,12 @@ CREATE TABLE IF NOT EXISTS jobs (
   attempts   INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
   PRIMARY KEY (model, image_sha, client)
+);
+-- pictures that arrived through the API: deleted once no job needs them.
+-- pictures from 'imgrec run DIR' are never listed here, so never deleted.
+CREATE TABLE IF NOT EXISTS uploads (
+  image_sha TEXT PRIMARY KEY,
+  at        TEXT NOT NULL
 );`
 
 type Pipeline struct {
@@ -72,9 +81,10 @@ const (
 	Queued Status = iota
 	Done
 	Failed
+	NeedImage // no answer, and the picture isn't here: send it
 )
 
-func (s Status) String() string { return [...]string{"queued", "done", "failed"}[s] }
+func (s Status) String() string { return [...]string{"queued", "done", "failed", "need_image"}[s] }
 
 func maxPixels(s *spec.Spec) int {
 	n, ok := s.Input["max_pixels"].(json.Number)
@@ -94,23 +104,22 @@ func (p *Pipeline) input(s *spec.Spec, sha string) (string, string, error) {
 		}
 		return path, sha, nil
 	}
-	return p.Images.Input(sha, maxPixels(s))
+	method, _ := s.Input["resize"].(string)
+	return p.Images.Input(sha, maxPixels(s), method)
 }
 
-// key is the cache key for a job; ok is false while a dependency it
-// reads has no answer yet.
-func (p *Pipeline) key(s *spec.Spec, sha string) (key, inputSHA, ctxText string, ok bool, err error) {
-	_, inputSHA, err = p.input(s, sha)
-	if err != nil {
-		return "", "", "", false, err
-	}
+// key is the cache key for a job, from the picture's hash: the downscaling
+// a model's input gets is in its spec (input.max_pixels, input.resize), so
+// the key needs no picture. ok is false while a dependency it reads has no
+// answer yet.
+func (p *Pipeline) key(s *spec.Spec, sha string) (key, ctxText string, ok bool, err error) {
 	if s.Needs != nil {
 		ctxText, ok, err = p.context(s.Needs, sha)
 		if err != nil || !ok {
-			return "", inputSHA, "", ok, err
+			return "", "", ok, err
 		}
 	}
-	return s.Key(inputSHA, ctxText), inputSHA, ctxText, true, nil
+	return s.Key(sha, ctxText), ctxText, true, nil
 }
 
 // context is the text a guard reads: what the needed model said about the
@@ -121,7 +130,7 @@ func (p *Pipeline) context(n *spec.Needs, sha string) (string, bool, error) {
 	if !exists {
 		return "", true, nil // a describer that isn't configured says nothing
 	}
-	key, _, _, ok, err := p.key(dep, sha)
+	key, _, ok, err := p.key(dep, sha)
 	if err != nil || !ok {
 		return "", ok, err
 	}
@@ -201,10 +210,7 @@ func (p *Pipeline) Intake(model, sha, client string) (Result, error) {
 	if !ok {
 		return Result{}, fmt.Errorf("no model %q", model)
 	}
-	if p.Images.Path(sha) == "" {
-		return Result{}, fmt.Errorf("no picture %s", sha)
-	}
-	key, _, _, ready, err := p.key(s, sha)
+	key, _, ready, err := p.key(s, sha)
 	if err != nil {
 		return Result{}, err
 	}
@@ -216,7 +222,11 @@ func (p *Pipeline) Intake(model, sha, client string) (Result, error) {
 		if rec != nil {
 			return Result{Status: Done, Record: rec}, nil
 		}
-	} else if s.Needs != nil {
+	}
+	if p.Images.Path(sha) == "" {
+		return Result{Status: NeedImage}, nil
+	}
+	if !ready && s.Needs != nil {
 		// it reads another model's answer: ask for that first
 		if _, err := p.Intake(s.Needs.Model, sha, client); err != nil {
 			return Result{}, err
@@ -297,7 +307,7 @@ type Asker func(ctx context.Context, request []byte) ([]byte, error)
 // record, write the store, and clear the job. A failure counts an attempt.
 func (p *Pipeline) Execute(ctx context.Context, name, sha string, ask Asker) error {
 	s := p.Specs[name]
-	key, inputSHA, ctxText, ready, err := p.key(s, sha)
+	key, ctxText, ready, err := p.key(s, sha)
 	if err == nil && !ready {
 		err = errors.New("a dependency has no answer yet")
 	}
@@ -307,7 +317,7 @@ func (p *Pipeline) Execute(ctx context.Context, name, sha string, ask Asker) err
 	if rec, _ := p.Records.Get(key); rec != nil { // answered meanwhile
 		return p.finish(s, sha, rec)
 	}
-	path, _, err := p.input(s, sha)
+	path, inputSHA, err := p.input(s, sha)
 	if err != nil {
 		return p.fail(name, sha, err)
 	}
@@ -372,10 +382,13 @@ func (p *Pipeline) fail(model, sha string, why error) error {
 	return why
 }
 
+// imageFor is a picture's store identity: described from the file when
+// it's here, by hash alone when it was an upload since deleted (the store
+// already has its row then).
 func imageFor(im *imagestore.Store, sha string) (store.Image, error) {
 	path := im.Path(sha)
 	if path == "" {
-		return store.Image{}, fmt.Errorf("no picture %s", sha)
+		return store.Image{SHA256: sha}, nil
 	}
 	return images.Describe(path)
 }
@@ -398,7 +411,7 @@ func (p *Pipeline) Status(name, sha string) (Result, bool, error) {
 	if !ok {
 		return Result{}, false, fmt.Errorf("no model %q", name)
 	}
-	key, _, _, ready, err := p.key(s, sha)
+	key, _, ready, err := p.key(s, sha)
 	if err != nil {
 		return Result{}, false, err
 	}
@@ -442,4 +455,59 @@ func (p *Pipeline) Contribution(name string, rec *records.Record) (model.Contrib
 		return model.Contribution{}, false
 	}
 	return p.parse(s, rec)
+}
+
+// Upload stores a picture that arrived through the API, verified against
+// the hash the client named. An upload is deleted once no job needs it
+// (Sweep); the same bytes already here from `imgrec run` stay put.
+func (p *Pipeline) Upload(r io.Reader, want string) (store.Image, error) {
+	im, created, err := p.Images.Put(r)
+	if err != nil {
+		return store.Image{}, err
+	}
+	if want != "" && im.SHA256 != want {
+		if created {
+			p.Images.Remove(im.SHA256)
+		}
+		return store.Image{}, fmt.Errorf("the bytes hash to %s, not %s", im.SHA256, want)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if created {
+		_, err = p.Store.DB.Exec("INSERT OR REPLACE INTO uploads(image_sha, at) VALUES (?, ?)", im.SHA256, now)
+	} else { // keep an existing upload alive; a batch picture stays unlisted
+		_, err = p.Store.DB.Exec("UPDATE uploads SET at = ? WHERE image_sha = ?", now, im.SHA256)
+	}
+	return im, err
+}
+
+// Sweep deletes uploaded pictures (and their stand-ins) that no job needs
+// any more, if they arrived longer ago than grace -- the grace is what
+// keeps an upload alive between arriving and its jobs being queued.
+func (p *Pipeline) Sweep(grace time.Duration) (int, error) {
+	cutoff := time.Now().Add(-grace).UTC().Format(time.RFC3339Nano)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	rows, err := p.Store.DB.Query("SELECT image_sha FROM uploads u WHERE at <= ? AND NOT EXISTS "+
+		"(SELECT 1 FROM jobs j WHERE j.image_sha = u.image_sha AND j.attempts < ?)", cutoff, p.MaxAttempts)
+	if err != nil {
+		return 0, err
+	}
+	var shas []string
+	for rows.Next() {
+		var sha string
+		rows.Scan(&sha)
+		shas = append(shas, sha)
+	}
+	rows.Close()
+	for _, sha := range shas {
+		if err := p.Images.Remove(sha); err != nil {
+			return 0, err
+		}
+		if _, err := p.Store.DB.Exec("DELETE FROM uploads WHERE image_sha = ?", sha); err != nil {
+			return 0, err
+		}
+	}
+	return len(shas), nil
 }

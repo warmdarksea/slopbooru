@@ -54,6 +54,24 @@ func serveCmd(args []string) error {
 	defer cancel()
 	schedDone := make(chan error, 1)
 	go func() { schedDone <- sc.Run(ctx, false) }()
+	// uploads no job needs any more are deleted (the answers stay); the
+	// grace keeps a fresh upload alive until its jobs are queued
+	go func() {
+		t := time.NewTicker(10 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if n, err := p.Sweep(time.Minute); err != nil {
+					logf("sweep: %v", err)
+				} else if n > 0 {
+					logf("deleted %d uploaded picture(s) no job needs", n)
+				}
+			}
+		}
+	}()
 	go func() {
 		<-ctx.Done()
 		shut, done := context.WithTimeout(context.Background(), 10*time.Second)

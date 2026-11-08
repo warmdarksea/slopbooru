@@ -128,29 +128,49 @@ That's today's fixed `PHASES`, made dynamic.
 ## HTTP API
 
 All calls carry `Authorization: Bearer <token>`. Every call is
-idempotent: asking twice is asking once.
+idempotent: asking twice is asking once. **Pictures travel only when
+needed**: a job is asked for by hash first.
 
 - `GET /v1/models` -- name, kind, output schema, spec hash
-- `PUT /v1/images/{sha256}` -- the bytes (hash verified): 201 stored,
-  200 already had it
-- `POST /v1/jobs {image, model}` -- 200 + result (cache hit), or 202 +
-  `Location: /v1/jobs/{model}/{sha}` (queued or already queued)
+- `POST /v1/jobs {image: sha, model}` -- 200 + the answer (cached), 202 +
+  `Location` (queued: the server has the picture), or **404
+  `need_image`** (send it). Not 204: that means "success, nothing to
+  read", and a client that only checks 2xx would record the job as done
+- `POST /v1/jobs` multipart -- `image` (sha), `models` (one or more),
+  `file`: the picture, verified against the hash; one upload serves every
+  model named. 202 if any is queued, else 200; the body lists each job
 - `GET /v1/jobs/{model}/{sha}?wait=N` -- 200 + result, 202 still pending
   (after holding up to N s), or the failure
-- `DELETE /v1/jobs/{model}/{sha}` -- cancel, if it hasn't run
+- `DELETE /v1/jobs/{model}/{sha}` -- withdraw your interest
+- `GET /v1/queue` -- per model: state, in flight, your pending jobs
+
+The cache key is computed from the picture's hash alone (the downscaling
+a model gets is declared in its spec: `input.max_pixels`, `input.resize`),
+which is what lets a hit need no picture.
+
+**Uploaded pictures are deleted once no job needs them** (done or failed
+for good; `Sweep`, every 10 s, with a 1-minute grace so a fresh upload
+lives until its jobs are queued). Their stand-ins go too; the answers
+stay. Pictures from `imgrec run DIR` are never deleted.
 
 **The client needs no queue**: its pending set is its own input list.
-`GET /v1/models`, upload each image, POST each (image, model), then GET
-the 202s with `?wait=60` until they are 200. A crashed client is re-run
-with the same inputs: what finished comes back 200 at once, nothing is
-queued twice.
+`imgrec submit`: ask every (picture, model) by hash, send each picture
+once for whichever models said `need_image`, then GET the 202s with
+`?wait=60` until they are 200. Re-run with the same inputs and nothing
+is sent twice.
 
 ## Clients (tenancy) and auth
 
 - `clients(id, name, token_hash, admin, created)`; `imgrec client add
   NAME [--admin]` prints a token once; the db keeps only its hash
-- a client sees the images it submitted; an image two clients submitted
-  is visible to both and still runs once (results are keyed by content)
+- answers are shared (an image two clients submitted runs once), but a
+  client gets one **by hash only for a picture it has itself sent at least
+  once** (`client_images`, which outlives the picture). Otherwise it is
+  `need_image`, byte for byte what a genuine miss looks like, so a hash
+  alone reveals nothing about anyone else's pictures. Once it sends the
+  bytes, a cached answer comes back at once, without re-running. (A
+  client holding the bytes can tell from that instant answer that someone
+  ran them: the price of sharing answers at all.)
 - admin sees everything and manages clients
 - the queue takes turns between clients
 

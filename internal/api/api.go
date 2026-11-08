@@ -2,23 +2,32 @@
 // model; every call is idempotent, so a client's "queue" is just its own
 // list of inputs, and re-running a client is how it polls.
 //
-//	GET    /v1/models                  what this server can run
-//	PUT    /v1/images/{sha256}         upload (hash verified): 201 new to you, 200 had it
-//	POST   /v1/images                  upload without knowing the hash: 201/200 + the sha
-//	POST   /v1/jobs {image, model}     200 + result (answered), 202 + Location (queued)
-//	GET    /v1/jobs/{model}/{sha}      200 result | 202 pending | 404; ?wait=N holds up to N s
-//	DELETE /v1/jobs/{model}/{sha}      withdraw your interest (it still runs if others want it)
-//	GET    /v1/queue                   per model: state, in flight, your pending jobs
+//	GET    /v1/models                       what this server can run
+//	POST   /v1/jobs {image, model}          by hash: 200 + answer | 202 queued | 404 need_image
+//	POST   /v1/jobs multipart               image (sha), models, file: the picture itself
+//	GET    /v1/jobs/{model}/{sha}?wait=N    200 answer | 202 pending | 404
+//	DELETE /v1/jobs/{model}/{sha}           withdraw your interest
+//	GET    /v1/queue                        per model: state, in flight, your pending jobs
 //
-// Every call carries Authorization: Bearer <token>. A client sees only the
-// pictures it submitted (an admin sees all); one it can't see is a 404,
-// never a 403, so clients can't probe for each other's pictures.
+// Pictures travel only when needed: ask by hash first, and send the bytes
+// on need_image. The server deletes an uploaded picture once no job needs
+// it; the answers stay.
+//
+// Every call carries Authorization: Bearer <token>. Answers are shared --
+// the same picture is answered once, whoever asks -- but a client gets
+// one by hash only for pictures it has itself sent at least once.
+// Otherwise it is need_image, exactly as if nothing were cached, so a hash
+// alone tells nobody whether anyone else ever submitted that picture. (A
+// client holding the bytes can still tell, from the instant answer, that
+// someone ran them: the price of sharing answers at all.) An admin sees
+// everything.
 package api
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -74,12 +83,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == "GET" && r.URL.Path == "/v1/models":
 		s.models(w)
-	case r.Method == "PUT" && len(parts) == 3 && parts[0] == "v1" && parts[1] == "images":
-		s.upload(w, r, c, parts[2])
-	case r.Method == "POST" && r.URL.Path == "/v1/images":
-		s.upload(w, r, c, "")
 	case r.Method == "POST" && r.URL.Path == "/v1/jobs":
-		s.postJob(w, r, c)
+		if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
+			s.postJobWithImage(w, r, c)
+		} else {
+			s.postJob(w, r, c)
+		}
 	case len(parts) == 4 && parts[0] == "v1" && parts[1] == "jobs" && (r.Method == "GET" || r.Method == "DELETE"):
 		s.job(w, r, c, parts[2], parts[3])
 	case r.Method == "GET" && r.URL.Path == "/v1/queue":
@@ -102,39 +111,6 @@ func (s *Server) models(w http.ResponseWriter) {
 	writeJSON(w, 200, map[string]any{"models": out})
 }
 
-func (s *Server) upload(w http.ResponseWriter, r *http.Request, c auth.Client, want string) {
-	if want != "" && !shaRE.MatchString(want) {
-		fail(w, 400, "not a sha256: %q", want)
-		return
-	}
-	body := http.MaxBytesReader(w, r.Body, s.MaxUpload)
-	im, err := s.P.Images.Put(body)
-	if err != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
-			fail(w, 413, "a picture is at most %d bytes", s.MaxUpload)
-		} else {
-			fail(w, 400, "%v", err)
-		}
-		return
-	}
-	if want != "" && im.SHA256 != want {
-		fail(w, 400, "the bytes hash to %s, not %s", im.SHA256, want)
-		return
-	}
-	isNew, err := s.Auth.Own(c.Name, im.SHA256)
-	if err != nil {
-		fail(w, 500, "%v", err)
-		return
-	}
-	code := 200
-	if isNew {
-		code = 201 // new to *you*: whether anyone else had it is not your business
-	}
-	writeJSON(w, code, map[string]any{"image": im.SHA256, "bytes": im.Bytes, "mime": im.Mime,
-		"width": im.Width, "height": im.Height})
-}
-
 // view is a job's answer as the API returns it.
 func (s *Server) view(model, sha string, res pipeline.Result) (int, map[string]any) {
 	out := map[string]any{"status": res.Status.String(), "model": model, "image": sha}
@@ -149,6 +125,10 @@ func (s *Server) view(model, sha string, res pipeline.Result) (int, map[string]a
 	case pipeline.Failed:
 		out["error"] = res.Error
 		return 200, out
+	case pipeline.NeedImage:
+		out["need_image"] = true
+		out["error"] = "send the picture: POST /v1/jobs as multipart, with the file"
+		return 404, out
 	}
 	return 202, out
 }
@@ -162,24 +142,43 @@ func location(model, sha string) string {
 	return "/v1/jobs/" + url.PathEscape(model) + "/" + sha
 }
 
-func (s *Server) visible(w http.ResponseWriter, c auth.Client, model, sha string) bool {
-	if _, ok := s.P.Specs[model]; !ok {
+// check validates a model and a hash; sees is whether this client has sent
+// that picture (or is admin) -- what entitles it to answers by hash.
+func (s *Server) check(w http.ResponseWriter, c auth.Client, model, sha string) (sees, ok bool) {
+	if _, exists := s.P.Specs[model]; !exists {
 		fail(w, 404, "no model %q (GET /v1/models)", model)
-		return false
+		return false, false
 	}
 	if !shaRE.MatchString(sha) {
 		fail(w, 400, "not a sha256: %q", sha)
-		return false
+		return false, false
 	}
-	ok, err := s.Auth.Sees(c, sha)
+	sees, err := s.Auth.Sees(c, sha)
 	if err != nil {
 		fail(w, 500, "%v", err)
-		return false
+		return false, false
 	}
-	if !ok {
-		fail(w, 404, "no picture %s (upload it first)", sha)
+	return sees, true
+}
+
+// answer runs intake for one job and says what came of it.
+func (s *Server) answer(c auth.Client, model, sha string) (int, map[string]any, error) {
+	res, err := s.P.Intake(model, sha, c.Name)
+	if err != nil {
+		return 0, nil, err
 	}
-	return ok
+	if res.Status == pipeline.Done {
+		// an answer that arrived another way (another machine's records)
+		// belongs in the store too; idempotent
+		if err := s.P.Materialize(model, sha, res.Record); err != nil && s.Logf != nil {
+			s.Logf("%s %s: %v", model, sha[:12], err)
+		}
+	}
+	code, out := s.view(model, sha, res)
+	if code == 202 {
+		out["location"] = location(model, sha)
+	}
+	return code, out, nil
 }
 
 func (s *Server) postJob(w http.ResponseWriter, r *http.Request, c auth.Client) {
@@ -191,31 +190,122 @@ func (s *Server) postJob(w http.ResponseWriter, r *http.Request, c auth.Client) 
 		fail(w, 400, "body: %v", err)
 		return
 	}
-	if !s.visible(w, c, req.Model, req.Image) {
+	sees, ok := s.check(w, c, req.Model, req.Image)
+	if !ok {
 		return
 	}
-	res, err := s.P.Intake(req.Model, req.Image, c.Name)
+	if !sees {
+		// never sent by this client: need_image, whether or not anything is
+		// cached -- a hash alone must not reveal that anyone else sent it
+		code, out := s.view(req.Model, req.Image, pipeline.Result{Status: pipeline.NeedImage})
+		writeJSON(w, code, out)
+		return
+	}
+	code, out, err := s.answer(c, req.Model, req.Image)
 	if err != nil {
 		fail(w, 500, "%v", err)
 		return
 	}
-	if res.Status == pipeline.Done {
-		// an answer that arrived another way (another machine's records)
-		// belongs in the store too; idempotent
-		if err := s.P.Materialize(req.Model, req.Image, res.Record); err != nil && s.Logf != nil {
-			s.Logf("%s %s: %v", req.Model, req.Image[:12], err)
-		}
-	}
-	code, out := s.view(req.Model, req.Image, res)
 	if code == 202 {
 		w.Header().Set("Location", location(req.Model, req.Image))
 	}
 	writeJSON(w, code, out)
 }
 
+// postJobWithImage is a job with the picture attached (multipart: field
+// image = its sha256, field models = one or more model names, file part
+// file = the bytes), for after a need_image. One upload serves every model
+// named. 202 if any job is queued, else 200; the body lists each.
+func (s *Server) postJobWithImage(w http.ResponseWriter, r *http.Request, c auth.Client) {
+	r.Body = http.MaxBytesReader(w, r.Body, s.MaxUpload+1<<20)
+	mr, err := r.MultipartReader()
+	if err != nil {
+		fail(w, 400, "%v", err)
+		return
+	}
+	var sha string
+	var models []string
+	var uploaded bool
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			var tooBig *http.MaxBytesError
+			if errors.As(err, &tooBig) {
+				fail(w, 413, "a picture is at most %d bytes", s.MaxUpload)
+			} else {
+				fail(w, 400, "%v", err)
+			}
+			return
+		}
+		switch part.FormName() {
+		case "image":
+			b, _ := io.ReadAll(io.LimitReader(part, 128))
+			sha = strings.TrimSpace(string(b))
+		case "models", "model":
+			b, _ := io.ReadAll(io.LimitReader(part, 1<<12))
+			for _, m := range strings.Split(string(b), ",") {
+				if m = strings.TrimSpace(m); m != "" {
+					models = append(models, m)
+				}
+			}
+		case "file":
+			// the fields come first: the hash must be known to verify the bytes
+			if !shaRE.MatchString(sha) || len(models) == 0 {
+				fail(w, 400, "send the image (sha256) and models fields before the file")
+				return
+			}
+			for _, m := range models {
+				if _, ok := s.check(w, c, m, sha); !ok {
+					return
+				}
+			}
+			if _, err := s.P.Upload(part, sha); err != nil {
+				var tooBig *http.MaxBytesError
+				if errors.As(err, &tooBig) {
+					fail(w, 413, "a picture is at most %d bytes", s.MaxUpload)
+				} else {
+					fail(w, 400, "%v", err)
+				}
+				return
+			}
+			if _, err := s.Auth.Own(c.Name, sha); err != nil {
+				fail(w, 500, "%v", err)
+				return
+			}
+			uploaded = true
+		}
+	}
+	if !uploaded {
+		fail(w, 400, "no file part")
+		return
+	}
+	code := 200
+	var jobs []map[string]any
+	for _, m := range models {
+		jc, out, err := s.answer(c, m, sha)
+		if err != nil {
+			fail(w, 500, "%v", err)
+			return
+		}
+		if jc == 202 {
+			code = 202
+		}
+		jobs = append(jobs, out)
+	}
+	writeJSON(w, code, map[string]any{"image": sha, "jobs": jobs})
+}
+
 func (s *Server) job(w http.ResponseWriter, r *http.Request, c auth.Client, model, sha string) {
 	model, _ = url.PathUnescape(model)
-	if !s.visible(w, c, model, sha) {
+	sees, ok := s.check(w, c, model, sha)
+	if !ok {
+		return
+	}
+	if !sees {
+		fail(w, 404, "no job %s on %s", sha, model)
 		return
 	}
 	if r.Method == "DELETE" {
