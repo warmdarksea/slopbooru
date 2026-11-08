@@ -177,7 +177,8 @@ the parity test's tool.
 
 ## Milestones
 
-1. specs + adapters + the cache rule + store import; replay parity
-2. jsonl backend
-3. runners + scheduler (batch mode), against stubs, then the card
-4. HTTP API, clients, tokens
+1. specs + adapters + the cache rule + store import; replay parity -- done
+2. jsonl backend -- done
+3. runners + scheduler (batch mode), against stubs -- done
+4. HTTP API, clients, tokens; packaging (flake + make) -- done
+5. the real card: every model through `imgrec run`, then `serve`

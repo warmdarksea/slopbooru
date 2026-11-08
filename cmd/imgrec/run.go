@@ -37,19 +37,29 @@ type fleet struct {
 	maxAttempts                                                              int
 }
 
+// env is a flag's default from IMGREC_<NAME>: how the flake's wrapper
+// hands over store paths (specs, manifest, vllm, the pixai worker).
+func env(name, def string) string {
+	if v := os.Getenv("IMGREC_" + name); v != "" {
+		return v
+	}
+	return def
+}
+
 func (f *fleet) flags(fs *flag.FlagSet) {
-	fs.StringVar(&f.db, "db", "results.db", "the store, the jobs and (by default) the records")
-	fs.StringVar(&f.recordsDir, "records", "", "keep records as jsonl in this directory instead of the db")
+	fs.StringVar(&f.db, "db", env("DB", "results.db"), "the store, the jobs and (by default) the records")
+	fs.StringVar(&f.recordsDir, "records", env("RECORDS", ""), "keep records as jsonl in this directory instead of the db")
 	host, _ := os.Hostname()
-	fs.StringVar(&f.writer, "writer", host, "this machine's jsonl file name (with --records)")
-	fs.StringVar(&f.imagesDir, "images-store", "", "where pictures are kept by content (default: <db>.images)")
-	fs.StringVar(&f.specsDir, "specs", "", "the specs directory")
-	fs.StringVar(&f.manifest, "manifest", "", "models.json: weights and closures, from the flake")
-	fs.StringVar(&f.vllm, "vllm", "vllm", "the vllm executable")
-	fs.StringVar(&f.pixai, "pixai", "", "the pixai worker command, e.g. 'python3 pixai_worker.py'")
-	fs.StringVar(&f.logs, "logs", "", "runner logs (default: <db>.logs)")
-	fs.StringVar(&f.models, "models", "", "comma-separated models (default: every spec)")
-	fs.DurationVar(&f.rotation, "rotation", 2*time.Hour, "a busy model gives way after this when others wait")
+	fs.StringVar(&f.writer, "writer", env("WRITER", host), "this machine's jsonl file name (with --records)")
+	fs.StringVar(&f.imagesDir, "images-store", env("IMAGES_STORE", ""), "where pictures are kept by content (default: <db>.images)")
+	fs.StringVar(&f.specsDir, "specs", env("SPECS", ""), "the specs directory")
+	fs.StringVar(&f.manifest, "manifest", env("MANIFEST", ""), "models.json: weights and closures, from the flake")
+	fs.StringVar(&f.vllm, "vllm", env("VLLM", "vllm"), "the vllm executable")
+	fs.StringVar(&f.pixai, "pixai", env("PIXAI", ""), "the pixai worker command, e.g. 'python3 pixai_worker.py'")
+	fs.StringVar(&f.logs, "logs", env("LOGS", ""), "runner logs (default: <db>.logs)")
+	fs.StringVar(&f.models, "models", env("MODELS", ""), "comma-separated models (default: every spec)")
+	rot, _ := time.ParseDuration(env("ROTATION", "2h"))
+	fs.DurationVar(&f.rotation, "rotation", rot, "a busy model gives way after this when others wait")
 	fs.IntVar(&f.maxAttempts, "max-attempts", 3, "tries per job before it counts as failed")
 }
 

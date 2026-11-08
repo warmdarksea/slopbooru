@@ -50,8 +50,16 @@ type Pipeline struct {
 	mu sync.Mutex // serializes the store and jobs writes
 }
 
+// Schema creates the jobs table: the one definition, for every command
+// that opens the db (a different one made first would be kept forever by
+// CREATE TABLE IF NOT EXISTS).
+func Schema(db *sql.DB) error {
+	_, err := db.Exec(jobsSchema)
+	return err
+}
+
 func New(specs map[string]*spec.Spec, st *store.Store, rec records.Backend, im *imagestore.Store) (*Pipeline, error) {
-	if _, err := st.DB.Exec(jobsSchema); err != nil {
+	if err := Schema(st.DB); err != nil {
 		return nil, err
 	}
 	return &Pipeline{Specs: specs, Store: st, Records: rec, Images: im, MaxAttempts: 3,
@@ -381,4 +389,57 @@ func (p *Pipeline) Materialize(model string, sha string, rec *records.Record) er
 		return fmt.Errorf("no model %q", model)
 	}
 	return p.finish(s, sha, rec)
+}
+
+// Status is a job's state without creating anything: exists is false when
+// nobody has asked for it and it has no answer.
+func (p *Pipeline) Status(name, sha string) (Result, bool, error) {
+	s, ok := p.Specs[name]
+	if !ok {
+		return Result{}, false, fmt.Errorf("no model %q", name)
+	}
+	key, _, _, ready, err := p.key(s, sha)
+	if err != nil {
+		return Result{}, false, err
+	}
+	if ready {
+		rec, err := p.Records.Get(key)
+		if err != nil {
+			return Result{}, false, err
+		}
+		if rec != nil {
+			return Result{Status: Done, Record: rec}, true, nil
+		}
+	}
+	var n, attempts int
+	var lastErr sql.NullString
+	if err := p.Store.DB.QueryRow("SELECT COUNT(*), COALESCE(MAX(attempts), 0), MAX(last_error) FROM jobs "+
+		"WHERE model = ? AND image_sha = ?", name, sha).Scan(&n, &attempts, &lastErr); err != nil {
+		return Result{}, false, err
+	}
+	if n == 0 {
+		return Result{}, false, nil
+	}
+	if attempts >= p.MaxAttempts {
+		return Result{Status: Failed, Error: lastErr.String}, true, nil
+	}
+	return Result{Status: Queued}, true, nil
+}
+
+// Cancel withdraws one client's interest in a job; it still runs if
+// another client wants it.
+func (p *Pipeline) Cancel(name, sha, client string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, err := p.Store.DB.Exec("DELETE FROM jobs WHERE model = ? AND image_sha = ? AND client = ?", name, sha, client)
+	return err
+}
+
+// Contribution is what a record means: the parsed answer.
+func (p *Pipeline) Contribution(name string, rec *records.Record) (model.Contribution, bool) {
+	s, ok := p.Specs[name]
+	if !ok {
+		return model.Contribution{}, false
+	}
+	return p.parse(s, rec)
 }

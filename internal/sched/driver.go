@@ -24,8 +24,8 @@ type Scheduler struct {
 
 	mu      sync.Mutex
 	slots   map[string]*slot
-	running map[string]bool // model \x00 sha being executed
-	cursor  map[string]int  // per model: round-robin position over clients
+	running map[string]bool   // model \x00 sha being executed
+	cursor  map[string]string // per model: the last client served
 }
 
 type slot struct {
@@ -77,10 +77,12 @@ func (s *Scheduler) Run(ctx context.Context, untilDrained bool) error {
 	if s.Grace == 0 {
 		s.Grace = 30 * time.Second
 	}
-	s.slots, s.running, s.cursor = map[string]*slot{}, map[string]bool{}, map[string]int{}
+	s.mu.Lock() // Snapshot may already be reading
+	s.slots, s.running, s.cursor = map[string]*slot{}, map[string]bool{}, map[string]string{}
 	for name, sp := range s.P.Specs {
 		s.slots[name] = &slot{spec: sp}
 	}
+	s.mu.Unlock()
 	defer s.stopAll()
 	tick := time.NewTicker(s.Tick)
 	defer tick.Stop()
@@ -194,8 +196,24 @@ func (s *Scheduler) dispatch(ctx context.Context, name string, sl *slot, jobs []
 	if free <= 0 || len(jobs) == 0 {
 		return
 	}
-	// each client's jobs, oldest first; a job several clients asked for is
-	// listed under each and runs once
+	busy := func(sha string) bool { return s.running[name+"\x00"+sha] }
+	picked, last := RoundRobin(jobs, busy, s.cursor[name], free)
+	if last != "" {
+		s.cursor[name] = last
+	}
+	for _, sha := range picked {
+		s.running[name+"\x00"+sha] = true
+		sl.inflight++
+		go s.execute(ctx, name, sl, sl.runner, sha)
+	}
+}
+
+// RoundRobin picks up to n jobs, taking turns between clients: one from
+// the client after `after` (in name order), one from the next, and so on,
+// each client's own jobs oldest first. A job several clients asked for
+// runs once, counted as the turn of whichever client reaches it first.
+// Returns the picks and the last client served (the next `after`).
+func RoundRobin(jobs []pipeline.Job, busy func(sha string) bool, after string, n int) ([]string, string) {
 	byClient := map[string][]pipeline.Job{}
 	for _, j := range jobs {
 		for _, c := range j.Clients {
@@ -207,36 +225,41 @@ func (s *Scheduler) dispatch(ctx context.Context, name string, sl *slot, jobs []
 		clients = append(clients, c)
 	}
 	sort.Strings(clients)
+	if len(clients) == 0 {
+		return nil, ""
+	}
+	start := sort.SearchStrings(clients, after)
+	if start < len(clients) && clients[start] == after {
+		start++ // begin with the client after the last one served
+	}
+	var picked []string
+	taken := map[string]bool{}
 	next := map[string]int{}
-	start := s.cursor[name]
-	for free > 0 {
+	last := ""
+	for len(picked) < n {
 		progressed := false
 		for i := range clients {
+			if len(picked) == n {
+				break
+			}
 			c := clients[(start+i)%len(clients)]
 			for next[c] < len(byClient[c]) {
 				j := byClient[c][next[c]]
 				next[c]++
-				key := name + "\x00" + j.SHA
-				if s.running[key] {
+				if taken[j.SHA] || busy(j.SHA) {
 					continue
 				}
-				s.running[key] = true
-				sl.inflight++
-				free--
-				progressed = true
-				go s.execute(ctx, name, sl, sl.runner, j.SHA)
+				taken[j.SHA] = true
+				picked = append(picked, j.SHA)
+				last, progressed = c, true
 				break
-			}
-			if free == 0 {
-				s.cursor[name] = (start + i + 1) % len(clients)
-				return
 			}
 		}
 		if !progressed {
-			s.cursor[name] = (start + 1) % len(clients)
-			return
+			break
 		}
 	}
+	return picked, last
 }
 
 func (s *Scheduler) execute(ctx context.Context, name string, sl *slot, r runner.Runner, sha string) {
@@ -266,4 +289,17 @@ func (s *Scheduler) stopAll() {
 		go func() { defer wg.Done(); r.Stop(s.Grace) }()
 	}
 	wg.Wait()
+}
+
+// Snapshot is what each model is doing, for the queue view.
+func (s *Scheduler) Snapshot() []Model {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Model
+	for name, sl := range s.slots {
+		out = append(out, Model{Name: name, GPU: gpuOf(sl.spec), State: sl.state,
+			UpSince: sl.upSince, Inflight: sl.inflight})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
