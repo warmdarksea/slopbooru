@@ -1,0 +1,60 @@
+# The release binaries -- linux and windows, amd64 and arm64, with
+# SHA256SUMS -- built after the tests pass and uploaded as the run's
+# artifact. With a tag, also published as a GitHub release (downloadable
+# without a GitHub account). Started by hand only.
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Also publish a release with this tag (e.g. v0.1.0); empty: artifact only"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: nix-build -A release
+        run: |
+          nix-build -A release -o result --print-build-logs
+          mkdir dist
+          cp -L result/* dist/
+          ls -l dist
+          cat dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slopbooru-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    if: inputs.tag != ''
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and its tag
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: slopbooru-${{ github.sha }}
+          path: dist
+      - name: gh release create
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "slopbooru $TAG" \
+            --notes "Static binaries for linux and windows (amd64, arm64), built from $GITHUB_SHA. Checksums in SHA256SUMS."
