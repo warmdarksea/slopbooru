@@ -1,4 +1,4 @@
-package main
+package classify
 
 import (
 	"bytes"
@@ -296,7 +296,7 @@ func rowsOf(t *testing.T, dbPath string) []string {
 
 func run(t *testing.T, args ...string) {
 	t.Helper()
-	if err := classifyRun(args); err != nil {
+	if err := Run(args); err != nil {
 		t.Fatalf("classify %v: %v", args, err)
 	}
 }

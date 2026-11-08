@@ -1,4 +1,4 @@
-package main
+package index
 
 // The image directory, indexed by content.
 //
@@ -23,6 +23,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"slopbooru/internal/cli"
+	"slopbooru/internal/sqliteuri"
+
+	_ "modernc.org/sqlite" // the driver, for the hash cache
 )
 
 type fileKey struct {
@@ -90,7 +95,7 @@ func BuildIndex(root, cache string, skip []string, jobs int) (*Index, error) {
 	var files []entry
 	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			logf("index: %v", err) // an unreadable subdirectory is not fatal
+			cli.Logf("index: %v", err) // an unreadable subdirectory is not fatal
 			if d != nil && d.IsDir() && p != root {
 				return fs.SkipDir
 			}
@@ -123,7 +128,7 @@ func BuildIndex(root, cache string, skip []string, jobs int) (*Index, error) {
 	if cache != "" {
 		db, err = openHashCache(cache)
 		if err != nil {
-			logf("index: no hash cache (%v); hashing everything", err)
+			cli.Logf("index: no hash cache (%v); hashing everything", err)
 			db = nil
 		} else {
 			defer db.Close()
@@ -160,7 +165,7 @@ func BuildIndex(root, cache string, skip []string, jobs int) (*Index, error) {
 			for f := range in {
 				sha, err := hashFile(f.path)
 				if err != nil {
-					logf("index: %v", err)
+					cli.Logf("index: %v", err)
 					continue
 				}
 				out <- result{f, sha}
@@ -186,14 +191,14 @@ func BuildIndex(root, cache string, skip []string, jobs int) (*Index, error) {
 				m[r.e.key] = r.sha
 			}
 			if err := saveHashes(db, m); err != nil {
-				logf("index: cache write failed: %v", err)
+				cli.Logf("index: cache write failed: %v", err)
 			}
 		}
 		batch = batch[:0]
 		lastSave = time.Now()
 	}
 	if len(todo) > 0 {
-		logf("index: %d file(s) under %s, %d known, hashing %d", len(files), root, ix.Cached, len(todo))
+		cli.Logf("index: %d file(s) under %s, %d known, hashing %d", len(files), root, ix.Cached, len(todo))
 	}
 	for r := range out {
 		ix.byHash[r.sha] = append(ix.byHash[r.sha], r.e.path)
@@ -205,7 +210,7 @@ func BuildIndex(root, cache string, skip []string, jobs int) (*Index, error) {
 		}
 		if time.Since(lastSay) > 5*time.Second {
 			el := time.Since(start).Seconds()
-			logf("index: hashed %d/%d (%.0f MB/s)", ix.Hashed, len(todo), float64(bytesDone)/1e6/el)
+			cli.Logf("index: hashed %d/%d (%.0f MB/s)", ix.Hashed, len(todo), float64(bytesDone)/1e6/el)
 			lastSay = time.Now()
 		}
 	}
@@ -224,7 +229,7 @@ func BuildIndex(root, cache string, skip []string, jobs int) (*Index, error) {
 			}
 		}
 		if err := dropHashes(db, stale); err != nil {
-			logf("index: cache prune failed: %v", err)
+			cli.Logf("index: cache prune failed: %v", err)
 		}
 	}
 
@@ -258,7 +263,7 @@ func openHashCache(path string) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", sqliteURI(path, "mode=rwc&_pragma=busy_timeout(5000)"))
+	db, err := sql.Open("sqlite", sqliteuri.For(path, "mode=rwc&_pragma=busy_timeout(5000)"))
 	if err != nil {
 		return nil, err
 	}

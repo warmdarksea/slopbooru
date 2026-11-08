@@ -230,7 +230,7 @@ writes the answers into the database. The database defaults to
 what's new.
 
 **What gets asked.** The models, and what each is asked, are in
-[`classify.toml`](classify.toml), which is built in. It holds seven models
+[`classify.toml`](internal/classify/classify.toml), which is built in. It holds seven models
 for anime-ish pictures:
 - a tagger;
 - two models that fill in a JSON description;
@@ -293,7 +293,7 @@ reproducible. It contains:
 
 ```
 nix-build -A fleet.timeshare-toml     # a timeshare.toml running every model as a child process
-timeshare serve --config result       # (with gpu-timeshare), then: slopbooru classify ...
+gpu-timeshare serve --config result   # then: slopbooru classify ...
 ```
 
 On NixOS, nornpkgs runs gpu-timeshare as a service with these models,
@@ -316,8 +316,8 @@ nix-shell                    # go, gopls, sqlite, wine
 Without nix: Go 1.26+, then
 
 ```
-CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" .
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" .
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" ./cmd/slopbooru
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" ./cmd/slopbooru
 ```
 
 On GitHub, both workflows are started by hand, from the **Actions** tab:
@@ -334,7 +334,7 @@ On GitHub, both workflows are started by hand, from the **Actions** tab:
     resuming, reparse, a safety model reading a description,
     downscaling, failures;
   - the reply parsers and the database writer.
-- `go run ./cmd/slopcheck -bin ./slopbooru` runs end to end against a
+- `go run ./test/slopcheck -bin ./slopbooru` runs end to end against a
   real binary:
   - it builds a fixture database and pictures, then moves and renames
     the pictures;

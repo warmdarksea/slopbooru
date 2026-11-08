@@ -35,7 +35,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"slopbooru/internal/fixture"
+	"slopbooru/test/fixture"
 )
 
 var (

@@ -1,4 +1,4 @@
-package main
+package booru
 
 // Editing by hand: add and remove values, upload and delete images.
 //

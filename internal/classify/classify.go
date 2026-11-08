@@ -1,4 +1,4 @@
-package main
+package classify
 
 // slopbooru classify: ask models about the pictures in a directory, and
 // write what they said into the db the booru browses.
@@ -51,8 +51,10 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"slopbooru/internal/cli"
 	"slopbooru/internal/images"
 	"slopbooru/internal/imagestore"
+	"slopbooru/internal/index"
 	"slopbooru/internal/model"
 	"slopbooru/internal/store"
 )
@@ -433,7 +435,7 @@ func (it item) customID() string {
 type classifier struct {
 	st      *store.Store
 	cfg     *classifyConf
-	index   *Index
+	index   *index.Index
 	standin string // stand-ins' directory
 	mu      sync.Mutex
 	asked   map[string]int // per model, this run
@@ -644,7 +646,7 @@ func (c *classifier) progress(force bool) {
 		parts = append(parts, s)
 	}
 	if len(parts) > 0 {
-		logf("answers so far: %s", strings.Join(parts, ", "))
+		cli.Logf("answers so far: %s", strings.Join(parts, ", "))
 	}
 }
 
@@ -839,7 +841,7 @@ func (c *classifier) startBatch(ctx context.Context, m *modelConf, path string, 
 			return err
 		}
 	}
-	logf("%s: batch %s, %d picture(s) (%s)", m.name, batch.ID, len(items), batch.Status)
+	cli.Logf("%s: batch %s, %d picture(s) (%s)", m.name, batch.ID, len(items), batch.Status)
 	return tx.Commit()
 }
 
@@ -865,7 +867,7 @@ func (c *classifier) await(ctx context.Context) error {
 		var url string
 		rows.Scan(&ob.id, &url, &ob.model, &ob.question)
 		if ob.backend = byURL[url]; ob.backend == nil {
-			logf("batch %s on %s: that backend is no longer configured; leaving it", ob.id, url)
+			cli.Logf("batch %s on %s: that backend is no longer configured; leaving it", ob.id, url)
 			continue
 		}
 		open = append(open, ob)
@@ -882,11 +884,11 @@ func (c *classifier) await(ctx context.Context) error {
 				}
 				var ae *apiError
 				if errors.As(err, &ae) && ae.Status == 404 {
-					logf("batch %s: the backend doesn't know it any more; dropping it", ob.id)
+					cli.Logf("batch %s: the backend doesn't know it any more; dropping it", ob.id)
 					c.forgetBatch(ob)
 					continue
 				}
-				logf("batch %s: %v (asking again later)", ob.id, err)
+				cli.Logf("batch %s: %v (asking again later)", ob.id, err)
 				still = append(still, ob)
 				continue
 			}
@@ -905,7 +907,7 @@ func (c *classifier) await(ctx context.Context) error {
 				line += fmt.Sprintf(" (%d failed)", st.RequestCounts.Failed)
 			}
 			if line != last[ob.id] {
-				logf("%s", line)
+				cli.Logf("%s", line)
 				last[ob.id] = line
 			}
 			switch st.Status {
@@ -1011,7 +1013,7 @@ func (c *classifier) ingest(ctx context.Context, ob openBatch, outID, errID stri
 		}
 	}
 	if len(pending) > 0 {
-		logf("%s: batch %s left %d picture(s) unanswered; the next run asks again", ob.model, ob.id, len(pending))
+		cli.Logf("%s: batch %s left %d picture(s) unanswered; the next run asks again", ob.model, ob.id, len(pending))
 	}
 	c.forgetBatch(ob)
 	return nil
@@ -1052,14 +1054,14 @@ func (c *classifier) reparse() error {
 		}
 		n++
 	}
-	logf("reparse: %d answer(s) written into the store again", n)
+	cli.Logf("reparse: %d answer(s) written into the store again", n)
 	return nil
 }
 
 // ---- the command -----------------------------------------------------------
 
-func classifyRun(args []string) error {
-	fs := flag.NewFlagSet(brand+" classify", flag.ExitOnError)
+func Run(args []string) error {
+	fs := flag.NewFlagSet(cli.Brand+" classify", flag.ExitOnError)
 	imagesDir := fs.String("images", "", "the pictures (searched recursively, found by content) (required)")
 	db := fs.String("db", "", "the db to write (default: DIR/results.db)")
 	config := fs.String("config", "", "a classify.toml read on top of the built-in one")
@@ -1071,7 +1073,7 @@ func classifyRun(args []string) error {
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "%s classify: ask models about pictures, into the db\n\n"+
 			"usage: %s classify --images DIR [--db results.db] [--config classify.toml] [--models a,b]\n\n",
-			brand, filepath.Base(os.Args[0]))
+			cli.Brand, filepath.Base(os.Args[0]))
 		fs.PrintDefaults()
 	}
 	fs.Parse(args)
@@ -1126,7 +1128,7 @@ func classifyRun(args []string) error {
 	thumbs := dbPath + ".thumbs"
 	start := time.Now()
 	skip := []string{dbPath, dbPath + "-wal", dbPath + "-shm", dbPath + "-journal", thumbs}
-	ix, err := BuildIndex(*imagesDir, filepath.Join(thumbs, "files.db"), skip, *jobs)
+	ix, err := index.BuildIndex(*imagesDir, filepath.Join(thumbs, "files.db"), skip, *jobs)
 	if err != nil {
 		return fmt.Errorf("cannot index %s: %v", *imagesDir, err)
 	}
@@ -1136,7 +1138,7 @@ func classifyRun(args []string) error {
 			shas = append(shas, s)
 		}
 	}
-	logf("%d picture(s) in %s (%d file(s), %d hashed, in %.1fs)", len(shas), *imagesDir, ix.Files, ix.Hashed,
+	cli.Logf("%d picture(s) in %s (%d file(s), %d hashed, in %.1fs)", len(shas), *imagesDir, ix.Files, ix.Hashed,
 		time.Since(start).Seconds())
 
 	c := &classifier{st: st, cfg: cfg, index: ix, standin: filepath.Join(thumbs, "standins"),
@@ -1160,7 +1162,7 @@ func classifyRun(args []string) error {
 		var n int
 		st.DB.QueryRow("SELECT COUNT(*) FROM classify_batches").Scan(&n)
 		if n > 0 {
-			logf("%d batch(es) from the last run first", n)
+			cli.Logf("%d batch(es) from the last run first", n)
 			if err := c.await(ctx); err != nil {
 				return err
 			}
@@ -1184,7 +1186,7 @@ func classifyRun(args []string) error {
 			if err != nil {
 				return err
 			}
-			logf("%s: %d of %d picture(s) to ask (%s, %s)", m.name, len(items), len(shas), m.backend.name, m.backend.Mode)
+			cli.Logf("%s: %d of %d picture(s) to ask (%s, %s)", m.name, len(items), len(shas), m.backend.name, m.backend.Mode)
 			if *dry || len(items) == 0 {
 				continue
 			}
@@ -1219,16 +1221,16 @@ func classifyRun(args []string) error {
 		}
 	}
 	c.progress(true)
-	logf("done in %s", time.Since(start).Round(time.Second))
+	cli.Logf("done in %s", time.Since(start).Round(time.Second))
 	return nil
 }
 
 var errUsage = errors.New("usage")
 
-func classifyMain(args []string) {
-	if err := classifyRun(args); errors.Is(err, errUsage) {
+func Main(args []string) {
+	if err := Run(args); errors.Is(err, errUsage) {
 		os.Exit(2)
 	} else if err != nil {
-		die("%v", err)
+		cli.Die("%v", err)
 	}
 }

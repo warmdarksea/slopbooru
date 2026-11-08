@@ -1,4 +1,4 @@
-package main
+package booru
 
 // Every page. A booru's shape: the values on a sidebar to the left, the
 // pictures beside it; on an image page the picture fitted to the screen with
@@ -8,6 +8,7 @@ import (
 	_ "embed"
 	"fmt"
 	"math"
+	"slopbooru/internal/cli"
 	"sort"
 	"strings"
 )
@@ -39,7 +40,7 @@ func page(title, body, q string) string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>` + e(title) + `</title><style>` + style + `</style></head><body>
 <header>
-  <span class="brand"><a href="/">` + e(brand) + `</a></span>
+  <span class="brand"><a href="/">` + e(cli.Brand) + `</a></span>
   <form action="/" method="get">
     <input type="search" name="q" value="` + e(q) + `"
       placeholder="marisa &middot; rating:safe &middot; model:pixai tag:marisa &middot; &quot;trying hard&quot;">
@@ -312,7 +313,7 @@ func (s *Store) RenderIndex(qs string, pageNo int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return page(brand, body, qs), nil
+	return page(cli.Brand, body, qs), nil
 }
 
 type box struct {

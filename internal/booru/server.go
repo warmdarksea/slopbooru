@@ -1,4 +1,4 @@
-package main
+package booru
 
 import (
 	"errors"
@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slopbooru/internal/cli"
+	"slopbooru/internal/index"
 	"strconv"
 	"strings"
 	"time"
@@ -14,7 +16,7 @@ import (
 
 type Server struct {
 	store     *Store
-	index     *Index // nil: serve the paths recorded in the db
+	index     *index.Index // nil: serve the paths recorded in the db
 	thumbs    string
 	imagesDir string // --images, where uploads go ("" if none)
 	verbose   bool
@@ -67,7 +69,7 @@ type statusWriter struct {
 func (w *statusWriter) WriteHeader(c int) { w.code = c; w.ResponseWriter.WriteHeader(c) }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Server", brand)
+	w.Header().Set("Server", cli.Brand)
 	sw := &statusWriter{w, 200}
 	if s.verbose {
 		defer func() {

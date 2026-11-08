@@ -4,7 +4,7 @@
 // json.dumps(detail, sort_keys=True), and annotation values as str(v);
 // the Go importer must produce the same bytes for the same answer, or a
 // store rebuilt in Go would differ from one built in python. Copied from
-// slopbooru's pycompat.go (a separate project), minus the html parts.
+// slopbooru's internal/booru/pycompat.go, minus the html parts.
 package pyjson
 
 import (

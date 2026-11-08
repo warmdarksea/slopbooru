@@ -1,18 +1,16 @@
-// slopbooru: a booru over the recognition store's sqlite db.
+// Package booru is slopbooru's web front end over the recognition
+// store's sqlite db: `slopbooru [serve] --db results.db --images DIR`.
 //
-//	slopbooru --db results.db --images DIR [--host 127.0.0.1] [--port 8800]
-//
-// One static binary with no dependencies on the host: pure Go sqlite
-// (modernc.org/sqlite, FTS5 included), stdlib http, Go image decoders for
-// the thumbnails. Pages: / grid (search + facets), /image/<id> everything
-// said about one image with per-value confidence and provenance,
-// /value/<field>/<v> the booru-style listing, /provenance/<id> the nix
-// closure that produced a set of answers, /stats coverage per model,
-// /api/image/<id> the rows as json.
+// No dependencies on the host: pure Go sqlite (modernc.org/sqlite, FTS5
+// included), stdlib http, Go image decoders for the thumbnails. Pages: /
+// grid (search + facets), /image/<id> everything said about one image with
+// per-value confidence and provenance, /value/<field>/<v> the booru-style
+// listing, /provenance/<id> the nix closure that produced a set of
+// answers, /stats coverage per model, /api/image/<id> the rows as json.
 //
 // Files are only ever served by image id, found by content in --images
-// (see index.go), never by a path from the request.
-package main
+// (see internal/index), never by a path from the request.
+package booru
 
 import (
 	"bufio"
@@ -25,35 +23,17 @@ import (
 	"runtime"
 	"strconv"
 	"time"
+
+	"slopbooru/internal/cli"
+	"slopbooru/internal/index"
 )
 
-// set at link time: -X main.brand=llm-booru inside the llm-qwen project
-var (
-	brand   = "slopbooru"
-	version = "dev"
-)
+var logf, die = cli.Logf, cli.Die
 
-func logf(format string, a ...any) {
-	fmt.Fprintf(os.Stderr, brand+": "+format+"\n", a...)
-}
-
-func die(format string, a ...any) {
-	logf(format, a...)
-	os.Exit(1)
-}
-
-func main() {
-	// slopbooru classify ...: ask models, into the db (classify.go);
-	// slopbooru [serve] ...: browse it
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "classify":
-			classifyMain(os.Args[2:])
-			return
-		case "serve":
-			os.Args = append(os.Args[:1], os.Args[2:]...)
-		}
-	}
+// Main is `slopbooru [serve] ARGS`: index the pictures, then serve.
+func Main(args []string) {
+	brand, version := cli.Brand, cli.Version
+	_ = version
 	fs := flag.NewFlagSet(brand, flag.ExitOnError)
 	db := fs.String("db", "", "the results.db to browse (required)")
 	images := fs.String("images", "", "the directory holding the pictures; found by content, so names and layout\n"+
@@ -71,7 +51,7 @@ func main() {
 			brand, version, filepath.Base(os.Args[0]))
 		fs.PrintDefaults()
 	}
-	if len(os.Args) == 1 {
+	if len(args) == 0 {
 		fs.Usage()
 		if runtime.GOOS == "windows" {
 			// double-clicked from explorer: keep the console open long
@@ -81,7 +61,7 @@ func main() {
 		}
 		os.Exit(2)
 	}
-	fs.Parse(os.Args[1:])
+	fs.Parse(args)
 	if *showVersion {
 		fmt.Println(brand, version)
 		return
@@ -148,7 +128,7 @@ func main() {
 			hashCache = filepath.Join(cacheDir, "files.db")
 		}
 		skip := []string{dbPath, dbPath + "-wal", dbPath + "-shm", dbPath + "-journal", cacheDir}
-		srv.index, err = BuildIndex(*images, hashCache, skip, *jobs)
+		srv.index, err = index.BuildIndex(*images, hashCache, skip, *jobs)
 		if err != nil {
 			die("cannot index %s: %v", *images, err)
 		}
@@ -165,7 +145,7 @@ func main() {
 }
 
 // matched counts the db's images that the index has a file for.
-func matched(s *Store, ix *Index) (int, int) {
+func matched(s *Store, ix *index.Index) (int, int) {
 	rows, err := s.query("SELECT sha256 FROM images")
 	if err != nil {
 		return 0, 0

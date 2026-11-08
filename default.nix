@@ -34,17 +34,8 @@ let
   # only what the go build reads, so editing this file rebuilds nothing
   src = lib.fileset.toSource {
     root = ./.;
-    fileset = lib.fileset.unions [
-      ./go.mod
-      ./go.sum
-      ./style.css
-      ./internal/fixture/schema.sql
-      ./internal/fixture/schema_fts.sql
-      ./internal/store/schema.sql
-      ./internal/store/schema_fts.sql
-      ./classify.toml
-      (lib.fileset.fileFilter (f: f.hasExt "go") ./.)
-    ];
+    # the go code and what it embeds (style.css, classify.toml, the schema)
+    fileset = lib.fileset.unions [ ./go.mod ./go.sum ./cmd ./internal ./test ];
   };
   vendorHash = "sha256-+D9ovT30kAek/KRjZ5EwV4jeQm7hEKbefBsCWAxGbnE=";
 
@@ -84,8 +75,8 @@ let
         runHook preBuild
         ${goEnv}
         GOOS=${goos} GOARCH=${goarch} go build \
-          -ldflags "-s -w -buildid= -X main.version=${version} -X main.brand=${brand}" \
-          -o $out/bin/${exe} .
+          -ldflags "-s -w -buildid= -X slopbooru/internal/cli.Version=${version} -X slopbooru/internal/cli.Brand=${brand}" \
+          -o $out/bin/${exe} ./cmd/slopbooru
         runHook postBuild
       '';
       dontInstall = true;
@@ -121,7 +112,7 @@ let
     nativeBuildInputs = [ pkgs.go ];
     buildPhase = ''
       ${goEnv}
-      go build -o $out/bin/slopcheck ./cmd/slopcheck
+      go build -o $out/bin/slopcheck ./test/slopcheck
     '';
     dontInstall = true;
     dontFixup = true;

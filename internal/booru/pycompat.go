@@ -1,4 +1,4 @@
-package main
+package booru
 
 // Formatting as the Python booru this was ported from printed it:
 // html.escape, urllib.parse.quote, str() of a float, json.dumps. The pages

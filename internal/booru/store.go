@@ -1,11 +1,10 @@
-package main
+package booru
 
 import (
 	"database/sql"
-	"fmt"
-	"path/filepath"
 	"regexp"
 	"runtime"
+	"slopbooru/internal/sqliteuri"
 	"strings"
 
 	_ "modernc.org/sqlite" // pure go: no cgo, no libsqlite3 on the host
@@ -134,25 +133,6 @@ type Store struct {
 	fts      bool
 }
 
-// sqliteURI is a file: uri for path, which has to survive a windows drive
-// letter and backslashes as well as a '?' or '#' in a name.
-func sqliteURI(path string, query string) string {
-	p := filepath.ToSlash(path)
-	if !strings.HasPrefix(p, "/") {
-		p = "/" + p // C:/x -> /C:/x, which sqlite's windows vfs expects
-	}
-	var b strings.Builder
-	for i := 0; i < len(p); i++ {
-		c := p[i]
-		if c == '%' || c == '?' || c == '#' || c == ' ' || c < 0x20 {
-			fmt.Fprintf(&b, "%%%02X", c)
-		} else {
-			b.WriteByte(c)
-		}
-	}
-	return "file://" + b.String() + "?" + query
-}
-
 func OpenStore(path string, writable bool) (*Store, error) {
 	if writable {
 		// --edit: read-write, with the foreign keys on so that deleting an
@@ -200,7 +180,7 @@ func OpenStore(path string, writable bool) (*Store, error) {
 }
 
 func (s *Store) open(mode string) error {
-	db, err := sql.Open("sqlite", sqliteURI(s.path, mode+"&_pragma=busy_timeout(5000)"))
+	db, err := sql.Open("sqlite", sqliteuri.For(s.path, mode+"&_pragma=busy_timeout(5000)"))
 	if err != nil {
 		return err
 	}

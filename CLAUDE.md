@@ -3,10 +3,19 @@
 One Go module (`module slopbooru`), one binary, two jobs:
 
 - `slopbooru [serve]`: the booru, a browser over the recognition sqlite db
-  (repository root: main.go, server.go, render.go, store.go, index.go, ...).
+  (`internal/booru`).
 - `slopbooru classify`: asks models about pictures through any
   OpenAI-compatible server and writes the answers into that db
-  (classify.go, classify.toml built in).
+  (`internal/classify`, classify.toml built in).
+
+Layout: `cmd/slopbooru` only picks one of the two. `internal/index` finds
+pictures by content (both jobs use it), `internal/sqliteuri` opens dbs on
+any OS, `internal/cli` is the brand,
+version and log lines (`-X slopbooru/internal/cli.Brand=...`), the rest
+of `internal/` is classify's helpers (store writer, reply parsers,
+images). `test/` is the end-to-end tester (`test/slopcheck`) and the
+fixture it and the booru's tests share. Unit tests sit beside their
+package, as Go wants. Nothing but docs and nix files in the root.
 
 Static Go, cgo off, released as plain binaries for linux/windows on
 amd64/arm64 (`nix-build -A release`). Both jobs run everywhere: classify is
@@ -52,11 +61,11 @@ Check `nix eval --raw -f . vllm-env.outPath` (bkhbyhhz...-vllm-env) and
   per file, `nix store add --mode nar`) -- never tofu-fetch multi-GB models.
 - Files nix builds from must be git-added (flake-style source filtering in
   callers); `default.nix`'s `src` fileset names what the Go build reads
-  (classify.toml and the schema files included).
+  (go.mod, go.sum, cmd/, internal/, test/: everything embedded lives there).
 
 ## invariants
 
-- **The schema exists twice here** (`internal/fixture/schema*.sql` for the
+- **The schema exists twice here** (`test/fixture/schema*.sql` for the
   booru's tests, `internal/store/schema*.sql` for the writer) and once more
   in llm-qwen's `src/py-pipeline/schema*.sql`. Change them together.
 - classify's own tables (`classify_*`) sit beside the store's in the same
@@ -81,5 +90,5 @@ GPU), `nix-build -A tests.all` (unit, static, linux and windows-under-wine
 slopcheck). slopcheck crawls ~600 pages of each fixture db: every page must
 render whole with its sidebar.
 
-On the real card: `timeshare serve --config $(nix-build -A fleet.timeshare-toml)`
+On the real card: `gpu-timeshare serve --config $(nix-build -A fleet.timeshare-toml)`
 (gpu-timeshare, with the whole GPU), then `slopbooru classify` against it.
