@@ -288,7 +288,8 @@ gpu-timeshare models. It's nix-only: the engine is a virtualenv of about
 reproducible. It contains:
 - the vllm engine;
 - the weights, pinned by revision and hash, about 75 GB in all;
-- each model's vllm settings and its share of the card;
+- each model's vllm settings, and how much of the card vllm takes (each
+  model has it to itself: gpu-timeshare runs one at a time);
 - `fleet/pixai_server.py`, which puts the pixai tagger behind the OpenAI API.
 
 ```

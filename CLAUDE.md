@@ -56,7 +56,8 @@ Check `nix eval --raw -f . vllm-env.outPath` (bkhbyhhz...-vllm-env) and
   wheel relaxWheels needs, in one pass. `fleet/engine/pyproject.toml` keeps
   its llm-qwen name on purpose (renaming relocks and rebuilds for nothing).
 - `fleet/default.nix`: per model, the vllm flags (`settings`, hashed into
-  the fingerprint, so into gpu-timeshare's cache key) and `cost`/`seqs`.
+  the fingerprint, so into gpu-timeshare's cache key) and `gpu`/`seqs`
+  (vllm's memory fraction: each model has the card to itself).
 - Big model downloads: prime the store with a resumable download (curl -C -
   per file, `nix store add --mode nar`) -- never tofu-fetch multi-GB models.
 - Files nix builds from must be git-added (flake-style source filtering in

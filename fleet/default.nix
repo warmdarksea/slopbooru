@@ -60,41 +60,42 @@ let
   structured = { structured_outputs_config = { backend = "xgrammar"; disable_any_whitespace = true; }; };
 
   # settings: what changes the answer (they go in the fingerprint, so in
-  # gpu-timeshare's cache key); cost/seqs: how it shares the card
-  served = name: { cost, seqs ? 4, settings ? { } }:
+  # gpu-timeshare's cache key); gpu/seqs: how much of the card vllm takes
+  # (each model has it to itself: gpu-timeshare runs one at a time) and
+  # requests in flight
+  served = name: { gpu ? 0.9, seqs ? 4, settings ? { } }:
     let
       w = weights.${name};
       s = common // settings;
     in
     {
       command = [ "${vllm}/bin/fleet-vllm" "serve" "${w}" "--served-model-name" name "--uds" "{socket}"
-        "--gpu-memory-utilization" (builtins.toJSON cost) "--max-num-seqs" (toString seqs) ] ++ flags s;
-      inherit cost;
+        "--gpu-memory-utilization" (builtins.toJSON gpu) "--max-num-seqs" (toString seqs) ] ++ flags s;
       concurrency = seqs;
       # the weights, and a hash of the settings that change the answer
       fingerprint = "${w}#${builtins.substring 0 16 (builtins.hashString "sha256" (builtins.toJSON s))}";
     };
 
   # the rest of the config, for services.gpu-timeshare.settings (or the
-  # toml below): the models on the card give way after an hour when others
-  # wait, and vllm may take a while to load one
+  # toml below): the model on the card gives way an hour after loading when
+  # another waits, and vllm may take a while to load one
   settings = {
     scheduler = { max_timeslice = "1h"; start_timeout = "20m"; };
   };
 
   models = {
-    qwen = served "qwen" { cost = 0.95; seqs = 8;
+    # qwen and gemma: weights ~18 GiB + profiling ~2.5 GiB need 0.95
+    qwen = served "qwen" { gpu = 0.95; seqs = 8;
       settings = structured // { mm_processor_kwargs = { max_pixels = 2500000; }; }; };
-    gemma = served "gemma" { cost = 0.95; seqs = 8; settings = structured; };
-    toriigate = served "toriigate" { cost = 0.90;
+    gemma = served "gemma" { gpu = 0.95; seqs = 8; settings = structured; };
+    toriigate = served "toriigate" {
       settings = { mm_processor_kwargs = { max_pixels = 2500000; }; }; };
-    joycaption = served "joycaption" { cost = 0.60; };
-    deepseek-ocr = served "deepseek-ocr" { cost = 0.32; };
-    llamaguard = served "llamaguard" { cost = 0.90; };
+    joycaption = served "joycaption" { };
+    deepseek-ocr = served "deepseek-ocr" { };
+    llamaguard = served "llamaguard" { };
     pixai = {
       command = [ "${pixai-server}/bin/pixai-server" "--model" "${weights.pixai}" "--uds" "{socket}"
         "--name" "pixai" "--batch" "16" ];
-      cost = 0.15;
       # requests in flight: the server batches them (up to 16)
       concurrency = 32;
       fingerprint = "${weights.pixai}#${builtins.substring 0 16 (builtins.hashString "sha256" (builtins.readFile ./pixai_server.py))}";
