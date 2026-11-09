@@ -95,7 +95,9 @@ let
     llamaguard = served "llamaguard" { };
     pixai = {
       command = [ "${pixai-server}/bin/pixai-server" "--model" "${weights.pixai}" "--uds" "{socket}"
-        "--name" "pixai" "--batch" "16" ];
+        "--name" "pixai" "--batch" "16"
+        # never the cpu fallback: ~90x slower, and silent
+        "--device" "cuda" ];
       # requests in flight: the server batches them (up to 16)
       concurrency = 32;
       fingerprint = "${weights.pixai}#${builtins.substring 0 16 (builtins.hashString "sha256" (builtins.readFile ./pixai_server.py))}";
